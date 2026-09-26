@@ -19,6 +19,8 @@ const movement = (values: Partial<Movement> & Pick<Movement, 'id' | 'origin'>): 
   dealer: '6',
   pairId: null,
   ...values,
+  reconciliationId: values.reconciliationId ?? null,
+  isAdjustment: values.isAdjustment ?? false,
 })
 
 test('opposing exact amounts are compatible', () => {
