@@ -17,6 +17,8 @@ export interface Movement {
   notes: string
   dealer: string
   pairId: number | null
+  reconciliationId: number | null
+  isAdjustment: boolean
 }
 
 export interface Candidate {
@@ -40,4 +42,26 @@ export interface ImportRow {
   creditCents?: number
   notes?: string
   dealer?: string
+}
+
+export interface AdjustmentInput {
+  reason: string
+  date?: string
+  receipt?: string
+  sector?: string
+  orderNo?: string
+  ref1?: string
+  ref2?: string
+}
+
+export interface ReconciliationRecord {
+  id: number
+  status: 'ACTIVA' | 'REVERTIDA'
+  mode: 'MANUAL' | 'AUTOMATICA'
+  adjustmentCents: number
+  adjustmentReason: string
+  createdAt: string
+  reversedAt: string | null
+  reversalReason: string
+  movements: Movement[]
 }

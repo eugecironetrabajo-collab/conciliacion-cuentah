@@ -1,5 +1,5 @@
 import './style.css'
-import { api, escapeHtml as esc, getMovements, money, shortDate, type Candidate, type Movement } from './api'
+import { api, escapeHtml as esc, getMovements, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
 
 type Route = 'resumen' | 'movimientos' | 'conciliar' | 'importar' | 'reportes' | 'auditoria'
 
@@ -127,47 +127,128 @@ function statusBadge(status: Movement['status']) {
 async function renderMovements(root: HTMLElement) {
   const rows = await getMovements()
   root.innerHTML = `
-    ${heading('Libro mayor', 'Movimientos', 'Consulte todas las partidas bancarias y contables.')}
-    <section class="panel filters">
-      <label>Estado<select id="f-estado"><option>TODOS</option><option>PENDIENTE</option><option>CONCILIADO</option><option>ELIMINADO</option></select></label>
-      <label>Origen<select id="f-origen"><option>TODOS</option><option>BANCO</option><option>LIBRO</option></select></label>
-      <label>Desde<input id="f-desde" type="date"></label>
-      <label>Hasta<input id="f-hasta" type="date"></label>
-      <button class="button secondary" id="f-aplicar">Aplicar filtros</button>
+    ${heading('Consulta de partidas', 'Búsqueda de movimientos', 'Combine filtros y abra una línea conciliada con doble clic para ver su conciliación.')}
+    <section class="panel advanced-filters">
+      <div class="filter-grid">
+        <label>Banco<select id="f-dealer"><option value="">Todos</option><option value="6">6 · Peugeot Citroën Argentina</option></select></label>
+        <label>Sector<input id="f-sector" placeholder="Todos"></label>
+        <label>Número de orden<input id="f-orden" inputmode="numeric"></label>
+        <label>Comprobante<input id="f-comprobante"></label>
+        <label>Importe desde<input id="f-importe-desde" inputmode="decimal" placeholder="0,00"></label>
+        <label>Importe hasta<input id="f-importe-hasta" inputmode="decimal" placeholder="Sin límite"></label>
+        <label>Fecha mov. desde<input id="f-desde" type="date"></label>
+        <label>Fecha mov. hasta<input id="f-hasta" type="date"></label>
+        <label>Fecha proc. desde<input id="f-proceso-desde" type="date"></label>
+        <label>Fecha proc. hasta<input id="f-proceso-hasta" type="date"></label>
+        <label>Ref. 1<input id="f-ref1"></label>
+        <label>Ref. 2<input id="f-ref2"></label>
+      </div>
+      <div class="filter-options">
+        <fieldset><legend>Origen</legend><label><input type="radio" name="f-origen" value="BANCO"> Banco</label><label><input type="radio" name="f-origen" value="LIBRO"> Contabilidad</label><label><input type="radio" name="f-origen" value="TODOS" checked> Ambos</label></fieldset>
+        <fieldset><legend>Signo</legend><label><input type="radio" name="f-signo" value="DEBITO"> Débitos</label><label><input type="radio" name="f-signo" value="CREDITO"> Créditos</label><label><input type="radio" name="f-signo" value="" checked> Ambos</label></fieldset>
+        <fieldset><legend>Estado</legend><label><input type="radio" name="f-estado" value="PENDIENTE"> Pendientes</label><label><input type="radio" name="f-estado" value="CONCILIADO"> Conciliados</label><label><input type="radio" name="f-estado" value="TODOS" checked> Ambos</label></fieldset>
+      </div>
+      <div class="filter-actions"><button class="button secondary" id="f-limpiar">Limpiar</button><button class="button primary" id="f-aplicar">Buscar partidas</button></div>
     </section>
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>Registro de partidas</h2><p><span id="row-count">${rows.length}</span> resultados</p></div></div>
+      <div class="panel-head"><div><h2>Partidas encontradas</h2><p><span id="row-count">${rows.length}</span> resultados · Doble clic para consultar una conciliación</p></div></div>
       <div class="table-scroll"><table class="standard-table"><thead><tr><th>ID</th><th>Origen</th><th>Estado</th><th>Fecha</th><th>Comprobante</th><th>Referencia</th><th>Detalle</th><th class="number">Débito</th><th class="number">Crédito</th><th>Acción</th></tr></thead><tbody id="movement-body"></tbody></table></div>
-    </section>`
+    </section><div id="modal-root"></div>`
   const draw = (items: Movement[]) => {
     document.querySelector('#row-count')!.textContent = String(items.length)
-    document.querySelector('#movement-body')!.innerHTML = items.map((row) => `<tr>
+    document.querySelector('#movement-body')!.innerHTML = items.map((row) => `<tr ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
       <td class="muted">#${row.id}</td><td><span class="origin-label ${row.origin.toLowerCase()}">${row.origin}</span></td>
       <td>${statusBadge(row.status)}</td><td>${shortDate(row.date)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
       <td class="mono">${esc(row.ref1 || row.ref2 || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
       <td class="number">${row.debitCents ? money(row.debitCents) : '—'}</td><td class="number">${row.creditCents ? money(row.creditCents) : '—'}</td>
-      <td>${row.status === 'CONCILIADO' ? `<button class="text-button danger" data-unreconcile="${row.id}">Desconciliar</button>` : `<a class="text-button" href="#/conciliar">Conciliar</a>`}</td>
+      <td>${row.status === 'CONCILIADO' ? `<button class="text-button" data-open="${row.reconciliationId}">Ver #${row.reconciliationId}</button>` : `<a class="text-button" href="#/conciliar">Conciliar</a>`}</td>
     </tr>`).join('')
-    document.querySelectorAll('[data-unreconcile]').forEach((button) => button.addEventListener('click', async () => {
-      const reason = prompt('Motivo para desconciliar:')
-      if (!reason) return
-      await api('/api/unreconcile', { method: 'POST', body: JSON.stringify({ id: Number((button as HTMLElement).dataset.unreconcile), motivo: reason }) })
-      toast('La pareja volvió a pendientes')
-      await renderMovements(root)
-    }))
+    document.querySelectorAll('[data-open]').forEach((button) => button.addEventListener('click', () => openReconciliationDetail(Number((button as HTMLElement).dataset.open), root)))
+    document.querySelectorAll('[data-reconciliation]').forEach((row) => {
+      const open = () => openReconciliationDetail(Number((row as HTMLElement).dataset.reconciliation), root)
+      row.addEventListener('dblclick', open)
+      row.addEventListener('keydown', (event) => {
+        if ((event as KeyboardEvent).key === 'Enter') open()
+      })
+    })
   }
   draw(rows)
   document.querySelector('#f-aplicar')?.addEventListener('click', async () => {
     const params = new URLSearchParams()
+    const inputValue = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value
+    const radioValue = (name: string) => (document.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement).value
     const values = [
-      ['estado', (document.querySelector('#f-estado') as HTMLSelectElement).value],
-      ['origen', (document.querySelector('#f-origen') as HTMLSelectElement).value],
-      ['desde', (document.querySelector('#f-desde') as HTMLInputElement).value],
-      ['hasta', (document.querySelector('#f-hasta') as HTMLInputElement).value],
+      ['dealer', inputValue('#f-dealer')], ['sector', inputValue('#f-sector')],
+      ['orden', inputValue('#f-orden')], ['comprobante', inputValue('#f-comprobante')],
+      ['importeDesde', inputValue('#f-importe-desde')], ['importeHasta', inputValue('#f-importe-hasta')],
+      ['desde', inputValue('#f-desde')], ['hasta', inputValue('#f-hasta')],
+      ['procesoDesde', inputValue('#f-proceso-desde')], ['procesoHasta', inputValue('#f-proceso-hasta')],
+      ['ref1', inputValue('#f-ref1')], ['ref2', inputValue('#f-ref2')],
+      ['origen', radioValue('f-origen')], ['signo', radioValue('f-signo')], ['estado', radioValue('f-estado')],
     ]
     values.forEach(([key, value]) => value && params.set(key, value))
     draw(await getMovements(`?${params}`))
   })
+  document.querySelector('#f-limpiar')?.addEventListener('click', () => renderMovements(root))
+}
+
+async function openReconciliationDetail(id: number, root: HTMLElement) {
+  const reconciliation = await api<Reconciliation>(`/api/reconciliaciones/${id}`)
+  const modalRoot = document.querySelector<HTMLDivElement>('#modal-root')!
+  const rows = reconciliation.movements
+  const debits = rows.reduce((sum, row) => sum + row.debitCents, 0)
+  const credits = rows.reduce((sum, row) => sum + row.creditCents, 0)
+  modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal wide reconciliation-detail">
+    <div class="modal-head"><div><span class="eyebrow">Detalle de conciliación</span><h2>Conciliación N.º ${reconciliation.id}</h2><p>${reconciliation.mode === 'AUTOMATICA' ? 'Automática' : 'Manual'} · ${new Date(`${reconciliation.createdAt}Z`).toLocaleString('es-AR')}</p></div><button class="modal-close" aria-label="Cerrar">×</button></div>
+    <div class="detail-summary"><span>${statusBadge(reconciliation.status === 'ACTIVA' ? 'CONCILIADO' : 'ELIMINADO')}</span><div><small>Partidas</small><b>${rows.length}</b></div><div><small>Total débitos</small><b>${money(debits)}</b></div><div><small>Total créditos</small><b>${money(credits)}</b></div><div><small>Diferencia original</small><b>${money(Math.abs(reconciliation.adjustmentCents))}</b></div></div>
+    <div class="ledger-wrap detail-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody>${rows.map((row) => ledgerRow(row, '', row.isAdjustment ? 'adjustment-row' : '')).join('')}</tbody></table></div>
+    ${reconciliation.status === 'REVERTIDA' ? `<div class="reversal-note"><b>Conciliación revertida</b><span>${esc(reconciliation.reversalReason)}</span></div>` : ''}
+    <div class="modal-actions"><button class="button secondary modal-close">Cerrar</button>${reconciliation.status === 'ACTIVA' ? '<button class="button danger-button" id="prepare-reversal">Preparar reversión</button>' : ''}</div>
+  </section></div>`
+  const close = () => modalRoot.innerHTML = ''
+  modalRoot.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', close))
+  modalRoot.querySelector('.modal-backdrop')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) close()
+  })
+  modalRoot.querySelector('#prepare-reversal')?.addEventListener('click', () => renderReversal(reconciliation, root, modalRoot))
+}
+
+function renderReversal(reconciliation: Reconciliation, root: HTMLElement, modalRoot: HTMLElement) {
+  let prepared = false
+  const originalRows = reconciliation.movements.filter((row) => !row.isAdjustment)
+  const draw = () => {
+    modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal wide reversal-workspace">
+      <div class="modal-head"><div><span class="eyebrow">Reversión de conciliaciones</span><h2>Conciliación N.º ${reconciliation.id}</h2><p>El grupo es indivisible: todas sus partidas se revierten juntas.</p></div><button class="modal-close" aria-label="Cerrar">×</button></div>
+      <div class="reversal-quadrant"><div class="quadrant-head"><div><span class="step">1</span><div><h2>Conciliación activa</h2><p>Doble clic para preparar la reversión completa</p></div></div></div>
+        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody>${prepared ? `<tr><td colspan="12">${empty('Grupo trasladado', 'Las partidas están listas para ser revertidas.')}</td></tr>` : reconciliation.movements.map((row) => ledgerRow(row, 'data-reverse-group tabindex="0"', row.isAdjustment ? 'adjustment-row' : '')).join('')}</tbody></table></div>
+      </div>
+      <div class="flow-divider"><span>↓</span><small>Grupo preparado para reversión</small><span>↓</span></div>
+      <div class="reversal-quadrant prepared"><div class="quadrant-head"><div><span class="step green">2</span><div><h2>Partidas a devolver a pendientes</h2><p>La línea de ajuste será anulada y permanecerá en el historial</p></div></div></div>
+        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody>${prepared ? originalRows.map((row) => ledgerRow(row)).join('') : `<tr><td colspan="12">${empty('Sin partidas preparadas', 'Traslade la conciliación completa desde el cuadrante superior.')}</td></tr>`}</tbody></table></div>
+      </div>
+      <label class="reason-field">Motivo de la reversión<textarea id="reversal-reason" rows="2" placeholder="Explique por qué se revierte esta conciliación">${prepared ? '' : ''}</textarea></label>
+      <div class="modal-actions"><button class="button secondary modal-close">Cancelar</button>${prepared ? '<button class="button secondary" id="return-reversal">Devolver arriba</button>' : ''}<button class="button danger-button" id="save-reversal" ${prepared ? '' : 'disabled'}>Guardar reversión</button></div>
+    </section></div>`
+    modalRoot.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', () => modalRoot.innerHTML = ''))
+    modalRoot.querySelectorAll('[data-reverse-group]').forEach((row) => {
+      const stage = () => { prepared = true; draw() }
+      row.addEventListener('dblclick', stage)
+      row.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') stage() })
+    })
+    modalRoot.querySelector('#return-reversal')?.addEventListener('click', () => { prepared = false; draw() })
+    modalRoot.querySelector('#save-reversal')?.addEventListener('click', async () => {
+      const reason = (modalRoot.querySelector('#reversal-reason') as HTMLTextAreaElement).value.trim()
+      if (!reason) {
+        toast('Indique el motivo de la reversión', 'error')
+        return
+      }
+      await api(`/api/reconciliaciones/${reconciliation.id}/revertir`, { method: 'POST', body: JSON.stringify({ motivo: reason }) })
+      modalRoot.innerHTML = ''
+      toast(`Conciliación ${reconciliation.id} revertida. ${originalRows.length} partidas volvieron a pendientes.`)
+      await renderMovements(root)
+    })
+  }
+  draw()
 }
 
 const ledgerColumns = `
@@ -190,13 +271,14 @@ function ledgerRow(row: Movement, attributes = '', extraClass = '') {
 
 async function renderReconcile(root: HTMLElement) {
   let rows = await getMovements('?estado=PENDIENTE')
-  const staged = new Map<string, Candidate>()
+  const staged = new Set<number>()
+  let stagedAutomatically = false
   let selectedBank: number | null = null
   let selectedBook: number | null = null
   let checked: Candidate | null = null
 
   root.innerHTML = `
-    ${heading('Mesa de trabajo', 'Conciliar partidas', 'Seleccione una partida bancaria y su contrapartida contable.', `
+    ${heading('Mesa de trabajo', 'Conciliar partidas', 'Haga doble clic para bajar partidas individualmente o use la búsqueda automática.', `
       <button class="button secondary" id="auto-preview">Búsqueda automática</button>
       <button class="button primary" id="confirm-all" disabled>Confirmar conciliación <span>→</span></button>`)}
     <section class="reconcile-filters">
@@ -208,7 +290,7 @@ async function renderReconcile(root: HTMLElement) {
     </section>
     <section class="quadrant">
       <div class="quadrant-head">
-        <div><span class="step">1</span><div><h2>Partidas pendientes</h2><p>Seleccione una línea de banco y una de libros</p></div></div>
+        <div><span class="step">1</span><div><h2>Partidas pendientes</h2><p>Doble clic para mover una línea al cuadrante inferior</p></div></div>
         <div class="legend"><span><i class="bank"></i>Banco</span><span><i class="book"></i>Libros</span><b id="pending-count"></b></div>
       </div>
       <div class="ledger-wrap top-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody id="pending-grid"></tbody></table></div>
@@ -222,7 +304,7 @@ async function renderReconcile(root: HTMLElement) {
     <section class="quadrant prepared">
       <div class="quadrant-head">
         <div><span class="step green">2</span><div><h2>Conciliación preparada</h2><p>Revise las contrapartidas antes de confirmar</p></div></div>
-        <span class="badge pending" id="staged-count">0 parejas</span>
+        <span class="badge pending" id="staged-count">0 partidas</span>
       </div>
       <div class="ledger-wrap bottom-ledger"><table class="ledger"><thead><tr>${ledgerColumns}<th class="action-col"></th></tr></thead><tbody id="staged-grid"></tbody></table></div>
       <div class="ledger-totals">
@@ -233,15 +315,14 @@ async function renderReconcile(root: HTMLElement) {
     </section>`
 
   const draw = () => {
-    const used = new Set([...staged.values()].flatMap((pair) => [pair.bankId, pair.bookId]))
-    const available = rows.filter((row) => !used.has(row.id))
+    const available = rows.filter((row) => !staged.has(row.id))
     const grid = document.querySelector('#pending-grid')!
     grid.innerHTML = available.length
       ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" tabindex="0"`, [
           row.id === selectedBank || row.id === selectedBook ? 'selected' : '',
           checked && (row.id === checked.bankId || row.id === checked.bookId) ? 'matched' : '',
         ].join(' '))).join('')
-      : `<tr><td colspan="12">${empty('Sin partidas pendientes', 'Importe nuevos movimientos o confirme las parejas preparadas.')}</td></tr>`
+      : `<tr><td colspan="12">${empty('Sin partidas pendientes', 'Importe nuevos movimientos o confirme las partidas preparadas.')}</td></tr>`
     document.querySelector('#pending-count')!.textContent = `${available.length} partidas`
     document.querySelectorAll('[data-sel]').forEach((node) => {
       const select = async () => {
@@ -256,9 +337,28 @@ async function renderReconcile(root: HTMLElement) {
         }
         draw()
       }
-      node.addEventListener('click', select)
+      let clickTimer: number | undefined
+      node.addEventListener('click', () => {
+        window.clearTimeout(clickTimer)
+        clickTimer = window.setTimeout(select, 220)
+      })
+      node.addEventListener('dblclick', (event) => {
+        event.preventDefault()
+        window.clearTimeout(clickTimer)
+        staged.add(Number((node as HTMLElement).dataset.sel))
+        selectedBank = selectedBook = null
+        checked = null
+        stagedAutomatically = false
+        draw()
+      })
       node.addEventListener('keydown', (event) => {
-        if ((event as KeyboardEvent).key === 'Enter' || (event as KeyboardEvent).key === ' ') select()
+        if ((event as KeyboardEvent).key === 'Enter') {
+          staged.add(Number((node as HTMLElement).dataset.sel))
+          selectedBank = selectedBook = null
+          checked = null
+          stagedAutomatically = false
+          draw()
+        } else if ((event as KeyboardEvent).key === ' ') select()
       })
     })
     drawSelection()
@@ -275,8 +375,8 @@ async function renderReconcile(root: HTMLElement) {
       label.textContent = checked.differenceCents === 0 ? 'Contrapartida compatible' : 'Los importes no compensan'
       hint.textContent = checked.reason
       difference.innerHTML = `<span>Diferencia</span><strong>${money(checked.differenceCents)}</strong>`
-      button.disabled = checked.differenceCents !== 0
-      bar.classList.toggle('ready', checked.differenceCents === 0)
+      button.disabled = false
+      bar.classList.add('ready')
     } else {
       label.textContent = selectedBank || selectedBook ? 'Falta seleccionar la contrapartida' : 'Seleccione dos partidas'
       hint.textContent = selectedBank ? 'Ahora seleccione una línea de libros' : selectedBook ? 'Ahora seleccione una línea bancaria' : 'Una bancaria y una contable'
@@ -288,22 +388,23 @@ async function renderReconcile(root: HTMLElement) {
 
   const drawStaged = () => {
     const grid = document.querySelector('#staged-grid')!
-    const pairs = [...staged.values()]
-    grid.innerHTML = pairs.length ? pairs.map((pair, pairIndex) => {
-      const bank = rows.find((row) => row.id === pair.bankId)!
-      const book = rows.find((row) => row.id === pair.bookId)!
-      return `${ledgerRow(book, '', 'pair-first')}<tr class="pair-second">
-        ${ledgerRow(bank).replace(/^<tr[^>]*>|<\/tr>$/g, '')}
-        <td class="action-col"><button class="remove-pair" data-remove="${pair.bankId}-${pair.bookId}" title="Devolver arriba">↑</button></td>
-      </tr>${pairIndex < pairs.length - 1 ? '<tr class="pair-gap"><td colspan="13"></td></tr>' : ''}`
-    }).join('') : `<tr><td colspan="13">${empty('Todavía no hay partidas preparadas', 'Seleccione una contrapartida arriba o ejecute la búsqueda automática.')}</td></tr>`
-    document.querySelector('#staged-count')!.textContent = `${pairs.length} ${pairs.length === 1 ? 'pareja' : 'parejas'}`
-    document.querySelector<HTMLButtonElement>('#confirm-all')!.disabled = pairs.length === 0
+    const stagedRows = rows.filter((row) => staged.has(row.id))
+    grid.innerHTML = stagedRows.length ? stagedRows.map((row) => `<tr class="staged-line" data-staged-line="${row.id}">
+      ${ledgerRow(row).replace(/^<tr[^>]*>|<\/tr>$/g, '')}
+      <td class="action-col"><button class="remove-pair" data-remove="${row.id}" title="Devolver arriba">↑</button></td>
+    </tr>`).join('') : `<tr><td colspan="13">${empty('Todavía no hay partidas preparadas', 'Haga doble clic arriba o ejecute la búsqueda automática.')}</td></tr>`
+    document.querySelector('#staged-count')!.textContent = `${stagedRows.length} ${stagedRows.length === 1 ? 'partida' : 'partidas'}`
+    const hasBank = stagedRows.some((row) => row.origin === 'BANCO')
+    const hasBook = stagedRows.some((row) => row.origin === 'LIBRO')
+    document.querySelector<HTMLButtonElement>('#confirm-all')!.disabled = !hasBank || !hasBook
     document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => {
-      staged.delete((button as HTMLElement).dataset.remove!)
+      staged.delete(Number((button as HTMLElement).dataset.remove))
       draw()
     }))
-    const stagedRows = rows.filter((row) => usedBy(pairs).has(row.id))
+    document.querySelectorAll('[data-staged-line]').forEach((line) => line.addEventListener('dblclick', () => {
+      staged.delete(Number((line as HTMLElement).dataset.stagedLine))
+      draw()
+    }))
     const debits = stagedRows.reduce((sum, row) => sum + row.debitCents, 0)
     const credits = stagedRows.reduce((sum, row) => sum + row.creditCents, 0)
     document.querySelector('#total-debits')!.textContent = money(debits)
@@ -311,31 +412,86 @@ async function renderReconcile(root: HTMLElement) {
     document.querySelector('#total-difference')!.textContent = money(Math.abs(debits - credits))
   }
 
-  const usedBy = (pairs: Candidate[]) => new Set(pairs.flatMap((pair) => [pair.bankId, pair.bookId]))
-
   document.querySelector('#stage-pair')!.addEventListener('click', () => {
-    if (!checked || checked.differenceCents !== 0) return
-    staged.set(`${checked.bankId}-${checked.bookId}`, checked)
+    if (!checked) return
+    staged.add(checked.bankId)
+    staged.add(checked.bookId)
     selectedBank = selectedBook = null
     checked = null
+    stagedAutomatically = false
     draw()
   })
   document.querySelector('#auto-preview')!.addEventListener('click', async () => {
     const proposal = await api<Candidate[]>('/api/reconcile/preview', { method: 'POST', body: '{}' })
-    proposal.forEach((pair) => staged.set(`${pair.bankId}-${pair.bookId}`, pair))
+    proposal.forEach((pair) => {
+      staged.add(pair.bankId)
+      staged.add(pair.bookId)
+    })
+    stagedAutomatically = true
     draw()
-    toast(`${proposal.length} pareja(s) preparadas. Revise antes de confirmar.`)
+    toast(`${proposal.length * 2} partida(s) preparadas. Revise antes de confirmar.`)
   })
   document.querySelector('#confirm-all')!.addEventListener('click', async () => {
-    if (!confirm(`¿Confirmar ${staged.size} pareja(s)? Esta acción quedará registrada en auditoría.`)) return
-    await api<{ confirmed: number }>('/api/reconcile', { method: 'POST', body: JSON.stringify({ pairs: [...staged.values()] }) })
-    toast('Conciliación confirmada correctamente')
-    await renderReconcile(root)
+    const stagedRows = rows.filter((row) => staged.has(row.id))
+    const debits = stagedRows.reduce((sum, row) => sum + row.debitCents, 0)
+    const credits = stagedRows.reduce((sum, row) => sum + row.creditCents, 0)
+    const difference = debits - credits
+    if (difference === 0) {
+      if (!confirm(`¿Confirmar ${staged.size} partidas como una sola conciliación?`)) return
+      await saveReconciliation()
+    } else {
+      openAdjustmentModal(difference, saveReconciliation)
+    }
   })
   document.querySelector('#refresh')!.addEventListener('click', async () => {
     rows = await getMovements('?estado=PENDIENTE')
     draw()
   })
+  const saveReconciliation = async (adjustment?: Record<string, string>) => {
+    const result = await api<{ reconciliationId: number }>('/api/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({
+        movementIds: [...staged],
+        adjustment,
+        mode: stagedAutomatically ? 'AUTOMATICA' : 'MANUAL',
+      }),
+    })
+    toast(`Conciliación N.º ${result.reconciliationId} guardada correctamente`)
+    await renderReconcile(root)
+  }
+  const openAdjustmentModal = (difference: number, save: (adjustment: Record<string, string>) => Promise<void>) => {
+    const side = difference > 0 ? 'Créditos Libros' : 'Débitos Libros'
+    const modal = document.createElement('div')
+    modal.className = 'modal-backdrop'
+    modal.innerHTML = `<section class="modal adjustment-modal">
+      <div class="modal-head"><div><span class="eyebrow">Partida de diferencia</span><h2>Completar ajuste contable</h2><p>Se generará una línea de ${side} por ${money(Math.abs(difference))}.</p></div><button class="modal-close">×</button></div>
+      <div class="adjustment-preview"><span>${side}</span><strong>${money(Math.abs(difference))}</strong></div>
+      <div class="adjustment-form">
+        <label class="full">Explicación obligatoria<textarea id="adj-reason" rows="3" placeholder="Indique a qué se debe la diferencia"></textarea></label>
+        <label>Fecha<input id="adj-date" type="date"></label><label>Comprobante<input id="adj-receipt" placeholder="AJDIF"></label>
+        <label>Sector<input id="adj-sector" placeholder="*"></label><label>Orden<input id="adj-order"></label>
+        <label>Ref. 1<input id="adj-ref1"></label><label>Ref. 2<input id="adj-ref2"></label>
+      </div>
+      <div class="modal-actions"><button class="button secondary modal-close">Cancelar</button><button class="button primary" id="save-adjustment">Crear ajuste y confirmar</button></div>
+    </section>`
+    document.body.append(modal)
+    const close = () => modal.remove()
+    modal.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', close))
+    modal.querySelector('#save-adjustment')!.addEventListener('click', async () => {
+      const value = (id: string) => (modal.querySelector(id) as HTMLInputElement | HTMLTextAreaElement).value.trim()
+      const reason = value('#adj-reason')
+      if (!reason) {
+        toast('La explicación de la diferencia es obligatoria', 'error')
+        return
+      }
+      await save({
+        reason, date: value('#adj-date'), receipt: value('#adj-receipt'),
+        sector: value('#adj-sector'), orderNo: value('#adj-order'),
+        ref1: value('#adj-ref1'), ref2: value('#adj-ref2'),
+      })
+      close()
+    })
+  }
   draw()
 }
 

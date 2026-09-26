@@ -4,6 +4,23 @@ export function signedAmount(row: Movement) {
   return row.debitCents - row.creditCents
 }
 
+export function balanceSummary(rows: Movement[]) {
+  const debits = rows.reduce((sum, row) => sum + row.debitCents, 0)
+  const credits = rows.reduce((sum, row) => sum + row.creditCents, 0)
+  const differenceCents = debits - credits
+  return {
+    debits,
+    credits,
+    differenceCents,
+    adjustmentSide: differenceCents > 0
+      ? 'CREDITO_LIBRO'
+      : differenceCents < 0
+        ? 'DEBITO_LIBRO'
+        : null,
+    adjustmentCents: Math.abs(differenceCents),
+  } as const
+}
+
 const dayDistance = (a: string, b: string) =>
   Math.round(Math.abs(new Date(a).getTime() - new Date(b).getTime()) / 86_400_000)
 

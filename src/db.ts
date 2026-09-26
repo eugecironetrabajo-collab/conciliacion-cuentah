@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3'
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import type { ImportRow, Movement, Origin } from './types.js'
+import type { AdjustmentInput, ImportRow, Movement, Origin, ReconciliationRecord } from './types.js'
+import { balanceSummary } from './reconcile.js'
 
 const dbPath = resolve(process.env.DB_PATH ?? 'data/conciliacion.db')
 mkdirSync(dirname(dbPath), { recursive: true })
@@ -35,6 +36,23 @@ db.exec(`
     difference_cents INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS reconciliations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'ACTIVA' CHECK(status IN ('ACTIVA','REVERTIDA')),
+    mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK(mode IN ('MANUAL','AUTOMATICA')),
+    adjustment_cents INTEGER NOT NULL DEFAULT 0,
+    adjustment_reason TEXT NOT NULL DEFAULT '',
+    legacy_pair_id INTEGER UNIQUE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reversed_at TEXT,
+    reversal_reason TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE IF NOT EXISTS reconciliation_items (
+    reconciliation_id INTEGER NOT NULL,
+    movement_id INTEGER NOT NULL,
+    is_adjustment INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (reconciliation_id, movement_id)
+  );
   CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL,
@@ -42,6 +60,33 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 `)
+
+const movementColumns = db.prepare('PRAGMA table_info(movements)').all() as Array<{ name: string }>
+if (!movementColumns.some((column) => column.name === 'reconciliation_id')) {
+  db.exec('ALTER TABLE movements ADD COLUMN reconciliation_id INTEGER')
+}
+if (!movementColumns.some((column) => column.name === 'is_adjustment')) {
+  db.exec('ALTER TABLE movements ADD COLUMN is_adjustment INTEGER NOT NULL DEFAULT 0')
+}
+
+const legacyPairs = db.prepare(`
+  SELECT p.* FROM pairs p
+  LEFT JOIN reconciliations r ON r.legacy_pair_id = p.id
+  WHERE r.id IS NULL
+`).all() as Array<{ id: number; bank_id: number; book_id: number; difference_cents: number; created_at: string }>
+db.transaction(() => {
+  for (const pair of legacyPairs) {
+    const result = db.prepare(`
+      INSERT INTO reconciliations (mode, adjustment_cents, legacy_pair_id, created_at)
+      VALUES ('AUTOMATICA', ?, ?, ?)
+    `).run(pair.difference_cents, pair.id, pair.created_at)
+    const reconciliationId = Number(result.lastInsertRowid)
+    db.prepare('INSERT INTO reconciliation_items (reconciliation_id, movement_id) VALUES (?, ?), (?, ?)')
+      .run(reconciliationId, pair.bank_id, reconciliationId, pair.book_id)
+    db.prepare('UPDATE movements SET reconciliation_id = ? WHERE id IN (?, ?)')
+      .run(reconciliationId, pair.bank_id, pair.book_id)
+  }
+})()
 
 const mapMovement = (row: Record<string, unknown>): Movement => ({
   id: Number(row.id),
@@ -59,6 +104,8 @@ const mapMovement = (row: Record<string, unknown>): Movement => ({
   notes: String(row.notes),
   dealer: String(row.dealer),
   pairId: row.pair_id === null ? null : Number(row.pair_id),
+  reconciliationId: row.reconciliation_id === null ? null : Number(row.reconciliation_id),
+  isAdjustment: Boolean(row.is_adjustment),
 })
 
 const fingerprint = (row: ImportRow) =>
@@ -117,6 +164,16 @@ export function listMovements(filters: {
   dealer?: string
   from?: string
   to?: string
+  processFrom?: string
+  processTo?: string
+  sector?: string
+  orderNo?: string
+  receipt?: string
+  ref1?: string
+  ref2?: string
+  sign?: string
+  amountFrom?: number
+  amountTo?: number
 } = {}) {
   const where: string[] = []
   const params: Record<string, string> = {}
@@ -140,6 +197,44 @@ export function listMovements(filters: {
     where.push('date <= @to')
     params.to = filters.to
   }
+  if (filters.processFrom) {
+    where.push('process_date >= @processFrom')
+    params.processFrom = filters.processFrom
+  }
+  if (filters.processTo) {
+    where.push('process_date <= @processTo')
+    params.processTo = filters.processTo
+  }
+  if (filters.sector) {
+    where.push('sector = @sector')
+    params.sector = filters.sector
+  }
+  if (filters.orderNo) {
+    where.push('order_no LIKE @orderNo')
+    params.orderNo = `%${filters.orderNo}%`
+  }
+  if (filters.receipt) {
+    where.push('receipt LIKE @receipt')
+    params.receipt = `%${filters.receipt}%`
+  }
+  if (filters.ref1) {
+    where.push('ref1 LIKE @ref1')
+    params.ref1 = `%${filters.ref1}%`
+  }
+  if (filters.ref2) {
+    where.push('ref2 LIKE @ref2')
+    params.ref2 = `%${filters.ref2}%`
+  }
+  if (filters.sign === 'DEBITO') where.push('debit_cents > 0')
+  if (filters.sign === 'CREDITO') where.push('credit_cents > 0')
+  if (filters.amountFrom !== undefined) {
+    where.push('MAX(debit_cents, credit_cents) >= @amountFrom')
+    params.amountFrom = String(filters.amountFrom)
+  }
+  if (filters.amountTo !== undefined) {
+    where.push('MAX(debit_cents, credit_cents) <= @amountTo')
+    params.amountTo = String(filters.amountTo)
+  }
   const sql = `SELECT * FROM movements ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY date, process_date, id`
   return (db.prepare(sql).all(params) as Record<string, unknown>[]).map(mapMovement)
 }
@@ -150,35 +245,133 @@ export function getMovements(ids: number[]) {
   return (db.prepare(`SELECT * FROM movements WHERE id IN (${placeholders})`).all(...ids) as Record<string, unknown>[]).map(mapMovement)
 }
 
-export function confirmPairs(pairs: Array<{ bankId: number; bookId: number; differenceCents: number }>) {
+export function confirmReconciliation(
+  movementIds: number[],
+  adjustment: AdjustmentInput | undefined,
+  mode: 'MANUAL' | 'AUTOMATICA' = 'MANUAL',
+) {
   return db.transaction(() => {
-    for (const pair of pairs) {
-      const rows = getMovements([pair.bankId, pair.bookId])
-      if (
-        rows.length !== 2 ||
-        rows.some((row) => row.status !== 'PENDIENTE') ||
-        !rows.some((row) => row.origin === 'BANCO') ||
-        !rows.some((row) => row.origin === 'LIBRO')
-      ) throw new Error('Una de las partidas ya no está disponible')
-      const result = db
-        .prepare('INSERT INTO pairs (bank_id, book_id, difference_cents) VALUES (?, ?, ?)')
-        .run(pair.bankId, pair.bookId, pair.differenceCents)
-      db.prepare("UPDATE movements SET status = 'CONCILIADO', pair_id = ? WHERE id IN (?, ?)")
-        .run(result.lastInsertRowid, pair.bankId, pair.bookId)
-      db.prepare("INSERT INTO audit (action, detail) VALUES ('CONCILIAR', ?)")
-        .run(`Pareja ${result.lastInsertRowid}: banco ${pair.bankId}, libro ${pair.bookId}`)
+    const uniqueIds = [...new Set(movementIds)]
+    const rows = getMovements(uniqueIds)
+    if (rows.length !== uniqueIds.length || rows.some((row) => row.status !== 'PENDIENTE')) {
+      throw new Error('Una de las partidas ya no está disponible')
     }
+    if (!rows.some((row) => row.origin === 'BANCO') || !rows.some((row) => row.origin === 'LIBRO')) {
+      throw new Error('La conciliación debe incluir partidas bancarias y contables')
+    }
+    const { differenceCents: difference } = balanceSummary(rows)
+    if (difference !== 0 && !adjustment?.reason.trim()) {
+      throw new Error('Explique el motivo de la diferencia contable')
+    }
+    const result = db.prepare(`
+      INSERT INTO reconciliations (mode, adjustment_cents, adjustment_reason)
+      VALUES (?, ?, ?)
+    `).run(mode, difference, adjustment?.reason.trim() ?? '')
+    const reconciliationId = Number(result.lastInsertRowid)
+    const itemStatement = db.prepare(`
+      INSERT INTO reconciliation_items (reconciliation_id, movement_id, is_adjustment)
+      VALUES (?, ?, ?)
+    `)
+    for (const row of rows) itemStatement.run(reconciliationId, row.id, 0)
+    db.prepare(`
+      UPDATE movements
+      SET status = 'CONCILIADO', reconciliation_id = ?, pair_id = ?
+      WHERE id IN (${uniqueIds.map(() => '?').join(',')})
+    `).run(reconciliationId, reconciliationId, ...uniqueIds)
+
+    let adjustmentId: number | null = null
+    if (difference !== 0) {
+      const date = adjustment?.date || rows.map((row) => row.date).sort().at(-1)!
+      const adjustmentResult = db.prepare(`
+        INSERT INTO movements (
+          origin, status, date, process_date, receipt, sector, order_no, ref1, ref2,
+          debit_cents, credit_cents, notes, dealer, pair_id, reconciliation_id,
+          is_adjustment, fingerprint
+        ) VALUES (
+          'LIBRO', 'CONCILIADO', @date, @date, @receipt, @sector, @orderNo, @ref1, @ref2,
+          @debitCents, @creditCents, @notes, @dealer, @reconciliationId, @reconciliationId,
+          1, @fingerprint
+        )
+      `).run({
+        date,
+        receipt: adjustment?.receipt || 'AJDIF',
+        sector: adjustment?.sector || '*',
+        orderNo: adjustment?.orderNo || '',
+        ref1: adjustment?.ref1 || '',
+        ref2: adjustment?.ref2 || '',
+        debitCents: difference < 0 ? Math.abs(difference) : 0,
+        creditCents: difference > 0 ? difference : 0,
+        notes: adjustment!.reason.trim(),
+        dealer: rows[0].dealer,
+        reconciliationId,
+        fingerprint: `AJUSTE|${reconciliationId}|${Date.now()}`,
+      })
+      adjustmentId = Number(adjustmentResult.lastInsertRowid)
+      itemStatement.run(reconciliationId, adjustmentId, 1)
+    }
+    db.prepare("INSERT INTO audit (action, detail) VALUES ('CONCILIAR', ?)")
+      .run(`Conciliación ${reconciliationId}: ${rows.length} partidas${adjustmentId ? `, ajuste ${adjustmentId}` : ''}`)
+    return { reconciliationId, movementCount: rows.length, adjustmentId, differenceCents: difference }
+  })()
+}
+
+export function getReconciliation(id: number): ReconciliationRecord | null {
+  const row = db.prepare('SELECT * FROM reconciliations WHERE id = ?').get(id) as Record<string, unknown> | undefined
+  if (!row) return null
+  const movements = (db.prepare(`
+    SELECT m.* FROM movements m
+    JOIN reconciliation_items ri ON ri.movement_id = m.id
+    WHERE ri.reconciliation_id = ?
+    ORDER BY ri.is_adjustment, m.date, m.id
+  `).all(id) as Record<string, unknown>[]).map(mapMovement)
+  return {
+    id: Number(row.id),
+    status: row.status as ReconciliationRecord['status'],
+    mode: row.mode as ReconciliationRecord['mode'],
+    adjustmentCents: Number(row.adjustment_cents),
+    adjustmentReason: String(row.adjustment_reason),
+    createdAt: String(row.created_at),
+    reversedAt: row.reversed_at ? String(row.reversed_at) : null,
+    reversalReason: String(row.reversal_reason),
+    movements,
+  }
+}
+
+export function reverseReconciliation(id: number, reason: string) {
+  return db.transaction(() => {
+    if (!reason.trim()) throw new Error('Indique el motivo de la reversión')
+    const reconciliation = getReconciliation(id)
+    if (!reconciliation || reconciliation.status !== 'ACTIVA') throw new Error('La conciliación no está activa')
+    db.prepare(`
+      UPDATE movements SET status = 'PENDIENTE', pair_id = NULL, reconciliation_id = NULL
+      WHERE id IN (
+        SELECT movement_id FROM reconciliation_items
+        WHERE reconciliation_id = ? AND is_adjustment = 0
+      )
+    `).run(id)
+    db.prepare(`
+      UPDATE movements SET status = 'ELIMINADO'
+      WHERE id IN (
+        SELECT movement_id FROM reconciliation_items
+        WHERE reconciliation_id = ? AND is_adjustment = 1
+      )
+    `).run(id)
+    db.prepare(`
+      UPDATE reconciliations
+      SET status = 'REVERTIDA', reversed_at = CURRENT_TIMESTAMP, reversal_reason = ?
+      WHERE id = ?
+    `).run(reason.trim(), id)
+    db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)")
+      .run(`Conciliación ${id}: ${reason.trim()}`)
+    return { reconciliationId: id, restored: reconciliation.movements.filter((row) => !row.isAdjustment).length }
   })()
 }
 
 export function unreconcile(id: number, reason: string) {
   const movement = getMovements([id])[0]
-  if (!movement?.pairId) throw new Error('La partida no está conciliada')
-  db.transaction(() => {
-    db.prepare("UPDATE movements SET status = 'PENDIENTE', pair_id = NULL WHERE pair_id = ?").run(movement.pairId)
-    db.prepare('DELETE FROM pairs WHERE id = ?').run(movement.pairId)
-    db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)").run(`Pareja ${movement.pairId}: ${reason}`)
-  })()
+  const reconciliationId = movement?.reconciliationId ?? movement?.pairId
+  if (!reconciliationId) throw new Error('La partida no está conciliada')
+  return reverseReconciliation(reconciliationId, reason)
 }
 
 export function statusSummary() {

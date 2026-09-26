@@ -2,7 +2,16 @@ import express from 'express'
 import multer from 'multer'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { auditRows, confirmPairs, insertMovements, listMovements, statusSummary, unreconcile } from './db.js'
+import {
+  auditRows,
+  confirmReconciliation,
+  getReconciliation,
+  insertMovements,
+  listMovements,
+  reverseReconciliation,
+  statusSummary,
+  unreconcile,
+} from './db.js'
 import { parseText, parseWorkbook } from './importers.js'
 import { automaticProposal, candidateFor, findCandidates } from './reconcile.js'
 
@@ -12,6 +21,11 @@ app.use(express.json({ limit: '2mb' }))
 
 const ok = (data: unknown) => ({ ok: true, data })
 const queryString = (value: unknown) => typeof value === 'string' ? value : undefined
+const queryCents = (value: unknown) => {
+  if (typeof value !== 'string' || value.trim() === '') return undefined
+  const number = Number(value.replace(/\./g, '').replace(',', '.'))
+  return Number.isFinite(number) ? Math.round(number * 100) : undefined
+}
 
 app.get('/api/health', (_req, res) => res.json(ok({ status: 'up' })))
 app.get('/api/status', (_req, res) => res.json(ok(statusSummary())))
@@ -22,6 +36,16 @@ app.get('/api/movimientos', (req, res) => {
     dealer: queryString(req.query.dealer),
     from: queryString(req.query.desde),
     to: queryString(req.query.hasta),
+    processFrom: queryString(req.query.procesoDesde),
+    processTo: queryString(req.query.procesoHasta),
+    sector: queryString(req.query.sector),
+    orderNo: queryString(req.query.orden),
+    receipt: queryString(req.query.comprobante),
+    ref1: queryString(req.query.ref1),
+    ref2: queryString(req.query.ref2),
+    sign: queryString(req.query.signo),
+    amountFrom: queryCents(req.query.importeDesde),
+    amountTo: queryCents(req.query.importeHasta),
   })))
 })
 app.get('/api/sugerencias', (req, res) => {
@@ -46,14 +70,33 @@ app.post('/api/reconcile/check', (req, res) => {
 })
 app.post('/api/reconcile', (req, res) => {
   try {
-    const pairs = Array.isArray(req.body.pairs) ? req.body.pairs : []
-    if (!pairs.length) throw new Error('No hay parejas preparadas para confirmar')
-    confirmPairs(pairs.map((pair: { bankId: unknown; bookId: unknown; differenceCents?: unknown }) => ({
-      bankId: Number(pair.bankId),
-      bookId: Number(pair.bookId),
-      differenceCents: Number(pair.differenceCents ?? 0),
-    })))
-    res.json(ok({ confirmed: pairs.length }))
+    let movementIds = Array.isArray(req.body.movementIds)
+      ? req.body.movementIds.map(Number)
+      : []
+    if (!movementIds.length && Array.isArray(req.body.pairs)) {
+      movementIds = req.body.pairs.flatMap((pair: { bankId: unknown; bookId: unknown }) => [
+        Number(pair.bankId), Number(pair.bookId),
+      ])
+    }
+    if (!movementIds.length) throw new Error('No hay partidas preparadas para confirmar')
+    const result = confirmReconciliation(
+      movementIds,
+      req.body.adjustment,
+      req.body.mode === 'AUTOMATICA' ? 'AUTOMATICA' : 'MANUAL',
+    )
+    res.json(ok(result))
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+})
+app.get('/api/reconciliaciones/:id', (req, res) => {
+  const reconciliation = getReconciliation(Number(req.params.id))
+  if (!reconciliation) return res.status(404).json({ ok: false, error: 'Conciliación no encontrada' })
+  res.json(ok(reconciliation))
+})
+app.post('/api/reconciliaciones/:id/revertir', (req, res) => {
+  try {
+    res.json(ok(reverseReconciliation(Number(req.params.id), String(req.body.motivo ?? ''))))
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
   }

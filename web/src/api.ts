@@ -14,6 +14,8 @@ export interface Movement {
   notes: string
   dealer: string
   pairId: number | null
+  reconciliationId: number | null
+  isAdjustment: boolean
 }
 
 export interface Candidate {
@@ -22,6 +24,18 @@ export interface Candidate {
   score: number
   differenceCents: number
   reason: string
+}
+
+export interface Reconciliation {
+  id: number
+  status: 'ACTIVA' | 'REVERTIDA'
+  mode: 'MANUAL' | 'AUTOMATICA'
+  adjustmentCents: number
+  adjustmentReason: string
+  createdAt: string
+  reversedAt: string | null
+  reversalReason: string
+  movements: Movement[]
 }
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {

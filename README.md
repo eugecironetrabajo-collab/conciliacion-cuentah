@@ -6,9 +6,16 @@ Aplicación web para conciliar movimientos bancarios de Cuenta H contra el mayor
 
 1. Importe el listado bancario y el mayor contable desde **Importar**.
 2. Abra **Conciliar** cuando quiera trabajar con las partidas pendientes.
-3. Seleccione una fila bancaria y una contable, o ejecute **Búsqueda automática**.
-4. Revise las parejas trasladadas al cuadrante inferior. Puede devolver cualquier pareja arriba.
-5. Use **Confirmar conciliación** para registrar el lote definitivamente.
+3. Haga doble clic sobre cada fila que quiera trasladar al cuadrante inferior, o ejecute **Búsqueda automática**.
+4. Prepare grupos 1:1, 1:N o N:1 y devuelva líneas individualmente si necesita corregir la selección.
+5. Use **Confirmar conciliación** para registrar todo el cuadrante inferior como un único grupo numerado.
+6. Si los débitos y créditos no compensan, explique la diferencia. El sistema creará el débito o crédito contable necesario y lo incorporará al grupo.
+
+## Consulta y reversión
+
+**Movimientos** permite combinar banco, sector, orden, comprobante, referencias, rangos de fecha e importe, origen, signo y estado. Al hacer doble clic sobre una partida conciliada se abre el grupo completo con su número, totales y línea de ajuste.
+
+Desde el detalle se puede preparar una reversión. La conciliación es indivisible: todas las partidas originales vuelven a pendientes, la línea de ajuste se anula y el grupo permanece en el historial con el motivo de la reversión.
 
 ## Desarrollo
 

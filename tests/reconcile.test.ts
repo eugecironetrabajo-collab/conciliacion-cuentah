@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { automaticProposal, candidateFor } from '../src/reconcile.js'
+import { automaticProposal, balanceSummary, candidateFor } from '../src/reconcile.js'
 import { parseAmount, parseText } from '../src/importers.js'
 import type { Movement } from '../src/types.js'
 
@@ -38,6 +38,31 @@ test('automatic proposal never reuses a movement', () => {
   const proposal = automaticProposal(rows)
   assert.equal(proposal.length, 1)
   assert.equal(proposal[0].bookId, 3)
+})
+
+test('1:N reconciliation creates a credit-book adjustment when debits are greater', () => {
+  const rows = [
+    movement({ id: 1, origin: 'BANCO', debitCents: 60_000 }),
+    movement({ id: 2, origin: 'BANCO', debitCents: 40_000 }),
+    movement({ id: 3, origin: 'LIBRO', creditCents: 90_000 }),
+  ]
+  assert.deepEqual(balanceSummary(rows), {
+    debits: 100_000,
+    credits: 90_000,
+    differenceCents: 10_000,
+    adjustmentSide: 'CREDITO_LIBRO',
+    adjustmentCents: 10_000,
+  })
+})
+
+test('N:1 reconciliation creates a debit-book adjustment when credits are greater', () => {
+  const rows = [
+    movement({ id: 1, origin: 'BANCO', creditCents: 70_000 }),
+    movement({ id: 2, origin: 'LIBRO', debitCents: 30_000 }),
+    movement({ id: 3, origin: 'LIBRO', debitCents: 35_000 }),
+  ]
+  assert.equal(balanceSummary(rows).adjustmentSide, 'DEBITO_LIBRO')
+  assert.equal(balanceSummary(rows).adjustmentCents, 5_000)
 })
 
 test('Argentine formatted amounts are converted to cents', () => {
