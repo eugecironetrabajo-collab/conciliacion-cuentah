@@ -48,7 +48,7 @@ app.post('/api/reconcile', (req, res) => {
   try {
     const pairs = Array.isArray(req.body.pairs) ? req.body.pairs : []
     if (!pairs.length) throw new Error('No hay parejas preparadas para confirmar')
-    confirmPairs(pairs.map((pair) => ({
+    confirmPairs(pairs.map((pair: { bankId: unknown; bookId: unknown; differenceCents?: unknown }) => ({
       bankId: Number(pair.bankId),
       bookId: Number(pair.bookId),
       differenceCents: Number(pair.differenceCents ?? 0),

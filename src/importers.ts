@@ -82,9 +82,31 @@ export function parseWorkbook(buffer: Buffer, origin: Origin) {
 
 export function parseText(buffer: Buffer, origin: Origin) {
   const text = buffer.toString('utf8').replace(/^\uFEFF/, '')
-  const firstLine = text.split(/\r?\n/)[0] ?? ''
+  const lines = text.split(/\r?\n/).filter((line) => line.trim())
+  const firstLine = lines[0] ?? ''
   const delimiter = firstLine.includes(';') ? ';' : firstLine.includes('\t') ? '\t' : ','
-  const workbook = XLSX.read(text, { type: 'string', FS: delimiter })
-  const sheet = workbook.Sheets[workbook.SheetNames[0]]
-  return mapRows(XLSX.utils.sheet_to_json(sheet, { defval: '' }), origin)
+  const parseLine = (line: string) => {
+    const values: string[] = []
+    let value = ''
+    let quoted = false
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index]
+      if (character === '"') {
+        if (quoted && line[index + 1] === '"') {
+          value += '"'
+          index += 1
+        } else quoted = !quoted
+      } else if (character === delimiter && !quoted) {
+        values.push(value.trim())
+        value = ''
+      } else value += character
+    }
+    values.push(value.trim())
+    return values
+  }
+  const headers = parseLine(firstLine)
+  const rows = lines.slice(1).map((line) => Object.fromEntries(
+    parseLine(line).map((value, index) => [headers[index] ?? `columna_${index}`, value]),
+  ))
+  return mapRows(rows, origin)
 }
