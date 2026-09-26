@@ -16,26 +16,32 @@ const app = document.querySelector<HTMLDivElement>('#app')!
 
 function shell() {
   app.innerHTML = `
-    <aside class="sidebar">
-      <a class="brand" href="#/resumen" aria-label="Cuenta H">
-        <span class="brand-mark">H</span>
-        <span><b>Cuenta H</b><small>Conciliación</small></span>
-      </a>
-      <nav id="nav">${routes.map((route) => `
-        <a href="#/${route.id}" data-nav="${route.id}">
-          <span class="nav-icon">${route.icon}</span>${route.label}
-        </a>`).join('')}</nav>
-      <div class="sidebar-foot">
-        <span class="status-dot"></span>
-        <span><b>Base activa</b><small id="db-badge">conciliacion.db</small></span>
+    <header class="app-header">
+      <div class="header-main">
+        <a class="brand" href="#/resumen" aria-label="SYC Conciliaciones">
+          <span class="brand-mark">S</span>
+          <span><b>SYC</b><small>Conciliaciones Cuenta H</small></span>
+        </a>
+        <div class="company-switcher">
+          <span>Empresa activa</span>
+          <button type="button"><b>Peugeot Citroën Argentina S.A.</b><small>Cuenta H · ARS</small><i>⌄</i></button>
+        </div>
+        <div class="top-actions">
+          <span class="live"><i></i>Sistema operativo</span>
+          <span class="database-pill"><small>Base activa</small><b id="db-badge">conciliacion.db</b></span>
+          <button class="user-menu"><span class="avatar">AP</span><span><b>Administración</b><small>Usuario local</small></span><i>⌄</i></button>
+        </div>
       </div>
-    </aside>
+      <div class="nav-bar">
+        <button class="menu-button" id="menu-button" aria-label="Abrir navegación">☰ <span id="crumb-current">Resumen</span></button>
+        <nav id="nav">${routes.map((route) => `
+          <a href="#/${route.id}" data-nav="${route.id}">
+            <span class="nav-icon">${route.icon}</span>${route.label}
+          </a>`).join('')}</nav>
+        <span class="nav-context">SYC / Cuenta H</span>
+      </div>
+    </header>
     <main>
-      <header class="topbar">
-        <button class="menu-button" id="menu-button" aria-label="Abrir menú">☰</button>
-        <div class="crumb">Administración <span>/</span> <b id="crumb-current">Resumen</b></div>
-        <div class="top-actions"><span class="live"><i></i>Sistema operativo</span><button class="avatar">AP</button></div>
-      </header>
       <div id="view" class="view"></div>
     </main>
     <div id="toast" role="status" aria-live="polite"></div>
@@ -97,13 +103,13 @@ async function renderSummary(root: HTMLElement) {
   ])
   const pending = rows.filter((row) => row.status === 'PENDIENTE').length
   const reconciled = rows.filter((row) => row.status === 'CONCILIADO').length
-  const pairs = new Set(rows.filter((row) => row.pairId).map((row) => row.pairId)).size
+  const reconciliations = new Set(rows.filter((row) => row.reconciliationId).map((row) => row.reconciliationId)).size
   const latest = [...rows].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5)
   root.innerHTML = `
     ${heading('Panel general', 'Resumen de Cuenta H', 'Estado de la conciliación y actividad reciente.', '<a class="button primary" href="#/conciliar">Abrir conciliación <span>→</span></a>')}
     <section class="metrics">
       <article><div class="metric-icon blue">≡</div><span>Partidas pendientes</span><strong>${pending}</strong><small>Requieren revisión</small></article>
-      <article><div class="metric-icon green">✓</div><span>Pares conciliados</span><strong>${pairs}</strong><small>${reconciled} partidas procesadas</small></article>
+      <article><div class="metric-icon green">✓</div><span>Conciliaciones</span><strong>${reconciliations}</strong><small>${reconciled} partidas procesadas</small></article>
       <article><div class="metric-icon amber">∑</div><span>Total débitos</span><strong>$ ${money(Number(status.totals.debits ?? 0))}</strong><small>Banco y libros</small></article>
       <article><div class="metric-icon ink">⇄</div><span>Diferencia global</span><strong>$ ${money(Math.abs(Number(status.totals.debits ?? 0) - Number(status.totals.credits ?? 0)))}</strong><small>Débitos contra créditos</small></article>
     </section>
