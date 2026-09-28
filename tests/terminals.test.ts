@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import * as XLSX from 'xlsx'
 import { parseBookFile } from '../src/importers.js'
-import { bookTerminal, normalizeBookAmounts } from '../src/terminals.js'
+import { bookTerminal, movementLabel, normalizeBookAmounts } from '../src/terminals.js'
 
 const workbook = (rows: unknown[][]) => {
   const sheet = XLSX.utils.aoa_to_sheet([
@@ -31,6 +31,11 @@ test('book terminals follow the account ending and bonuses can be shared', () =>
   assert.equal(bookTerminal('211112006001', 'Movimiento').skip, true)
   assert.deepEqual(normalizeBookAmounts(0, -175_274_173), { debitCents: 175_274_173, creditCents: 0 })
   assert.deepEqual(normalizeBookAmounts(-50, 20), { debitCents: 0, creditCents: 70 })
+  assert.equal(movementLabel('BANCO', '1337', '41110100'), '1337 · Peugeot Pergamino')
+  assert.equal(movementLabel('LIBRO', '3831', '211112006007'), '006007 · Citroën San Nicolás')
+  assert.equal(movementLabel('LIBRO', '3831,3847', '211112006007'), '006007 · Citroën San Nicolás')
+  assert.equal(movementLabel('LIBRO', '1337,3550', '211112002001'), '002001 · Peugeot Junín')
+  assert.equal(movementLabel('LIBRO', '3847', '211112011007'), '011007 · Citroën Trelew')
 })
 
 test('ignored account endings are reported and not imported', () => {
@@ -68,8 +73,18 @@ test('combined statuses and permanent deletion keep reconciled movements', async
   if (!partial) throw new Error('No se cargó la partida parcial')
   const reconciliation = db.confirmReconciliation([kept.id, partial.id], { reason: 'Diferencia' })
   assert.ok(reconciliation.reconciliationId)
-  const reconciled = db.listMovements({ status: 'CONCILIADO' }).find((row) => row.notes === 'Libro')
-  if (!reconciled) throw new Error('La partida contable no quedó conciliada')
-  db.db.prepare(`UPDATE movements SET status = 'ELIMINADO' WHERE id = ?`).run(reconciled.id)
-  assert.throws(() => db.purgeMovements([reconciled.id]), /conciliación/)
+  db.reverseReconciliation(reconciliation.reconciliationId, 'Prueba')
+  db.deleteMovements([kept.id], 'Ya revertida')
+  assert.equal(db.purgeMovements([kept.id]).deleted, 1)
+  assert.equal(db.getMovements([kept.id]).length, 0)
+
+  const activeBank = db.listMovements({ status: 'PENDIENTE' }).find((row) => row.notes === 'Parcial')
+  const activeBook = db.importBatches([{ name: 'l2.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-03', debitCents: 40, sector: '211112011001', notes: 'Activa', fingerprint: 'libro-activa' }] }])
+  assert.equal(activeBook[0]?.inserted, 1)
+  const active = db.listMovements({ status: 'PENDIENTE' }).find((row) => row.notes === 'Activa')
+  if (!activeBank || !active) throw new Error('No quedaron partidas para la conciliación activa')
+  const activeGroup = db.confirmReconciliation([activeBank.id, active.id], undefined)
+  db.db.prepare(`UPDATE movements SET status = 'ELIMINADO' WHERE id = ?`).run(active.id)
+  assert.throws(() => db.purgeMovements([active.id]), /conciliación activa/)
+  assert.equal(db.getReconciliation(activeGroup.reconciliationId)?.status, 'ACTIVA')
 })

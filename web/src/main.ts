@@ -1,5 +1,5 @@
 import './style.css'
-import { TERMINALS, terminalLabel } from '../../src/terminals.js'
+import { TERMINALS, movementLabel } from '../../src/terminals.js'
 import { api, escapeHtml as esc, getMovements, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
 
 const dealerOptions = `<option value="">Todas</option>${TERMINALS.map((terminal) => `<option value="${terminal.code}">${terminal.code} · ${terminal.label}</option>`).join('')}`
@@ -200,7 +200,7 @@ async function renderMovements(root: HTMLElement) {
     document.querySelector('#movement-body')!.innerHTML = items.map((row) => `<tr ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
       <td>${manageable(row) ? `<input class="row-check" type="checkbox" data-id="${row.id}" data-status="${row.status}" aria-label="Seleccionar movimiento ${row.id}">` : ''}</td>
       <td class="muted">#${row.id}</td><td><span class="origin-label ${row.origin.toLowerCase()}">${row.origin}</span></td>
-      <td>${esc(terminalLabel(row.dealer))}</td>
+      <td>${esc(movementLabel(row.origin, row.dealer, row.sector))}</td>
       <td>${statusBadge(row.status)}</td><td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
       <td class="mono">${esc(row.ref1 || row.ref2 || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
       <td class="number">${row.debitCents ? money(row.debitCents) : '—'}</td><td class="number">${row.creditCents ? money(row.creditCents) : '—'}</td>
@@ -250,10 +250,11 @@ async function renderMovements(root: HTMLElement) {
     modal.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', close))
     modal.querySelector('#confirm-purge')!.addEventListener('click', async () => {
       try {
-        await api('/api/movimientos/borrar', { method: 'POST', body: JSON.stringify({ ids }) })
+        const result = await api<{ deleted: number; rejected: number }>('/api/movimientos/borrar', { method: 'POST', body: JSON.stringify({ ids }) })
         close()
         await renderMovements(root)
-        toast(`${ids.length} movimiento(s) borrados definitivamente`)
+        const pending = result.rejected ? ` ${result.rejected} siguen en una conciliación activa.` : ''
+        toast(`${result.deleted} movimiento(s) borrados definitivamente.${pending}`)
       } catch (error) {
         toast(error instanceof Error ? error.message : 'No se pudo borrar', 'error')
       }
@@ -372,7 +373,7 @@ const ledgerColumns = `
 
 function ledgerRow(row: Movement, attributes = '', extraClass = '') {
   return `<tr ${attributes} class="${extraClass}">
-    <td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(terminalLabel(row.dealer))}</td><td>${esc(row.receipt)}</td>
+    <td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(movementLabel(row.origin, row.dealer, row.sector))}</td><td>${esc(row.receipt)}</td>
     <td>${esc(row.sector || '—')}</td><td>${esc(row.orderNo)}</td><td class="mono">${esc(row.ref1)}</td><td class="mono">${esc(row.ref2)}</td>
     <td class="number amount">${row.origin === 'LIBRO' && row.debitCents ? money(row.debitCents) : ''}</td>
     <td class="number amount">${row.origin === 'BANCO' && row.creditCents ? money(row.creditCents) : ''}</td>

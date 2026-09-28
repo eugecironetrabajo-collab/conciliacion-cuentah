@@ -42,11 +42,27 @@ export function normalizeBookAmounts(debitCents: number, creditCents: number) {
   return { debitCents: debit, creditCents: credit }
 }
 
+const ENDING_LABELS: Record<string, string> = {
+  '001001': 'Peugeot Pergamino',
+  '011001': 'Peugeot Trelew',
+  '002001': 'Peugeot Junín',
+  '006007': 'Citroën San Nicolás',
+  '011007': 'Citroën Trelew',
+}
+
 export function terminalLabel(dealer: string) {
   if (dealer === '1337,3550') return '1337 · 3550 · Junín'
   if (dealer === '3831,3847') return '3831 · San Nicolás / 3847 · Trelew'
   const known = TERMINALS.find((terminal) => terminal.code === dealer)
   return known ? `${known.code} · ${known.label}` : (dealer || '—')
+}
+
+export function movementLabel(origin: string, dealer: string, sector: string) {
+  if (origin !== 'LIBRO') return terminalLabel(dealer)
+  const ending = accountEnding(sector)
+  if (!ending) return terminalLabel(dealer)
+  const place = ENDING_LABELS[ending]
+  return place ? `${ending} · ${place}` : ending
 }
 
 export const bookFingerprint = (

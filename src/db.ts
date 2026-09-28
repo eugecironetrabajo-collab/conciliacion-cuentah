@@ -201,18 +201,24 @@ export function purgeMovements(ids: number[]) {
   if (!uniqueIds.length) throw new Error('Seleccione al menos un movimiento')
   const rows = getMovements(uniqueIds)
   if (rows.length !== uniqueIds.length) throw new Error('Uno de los movimientos ya no existe')
-  const linked = db.prepare('SELECT movement_id FROM reconciliation_items WHERE movement_id = ?')
-  const invalid = rows.find((row) => row.status !== 'ELIMINADO' || row.isAdjustment || linked.get(row.id))
-  if (invalid) throw new Error('Solo se pueden borrar definitivamente movimientos eliminados que no pertenecen a una conciliación')
+  const activeLink = db.prepare(`
+    SELECT 1 FROM reconciliation_items ri
+    JOIN reconciliations r ON r.id = ri.reconciliation_id
+    WHERE ri.movement_id = ? AND r.status = 'ACTIVA'
+  `)
+  const removable = rows.filter((row) => row.status === 'ELIMINADO' && !activeLink.get(row.id))
+  if (!removable.length) throw new Error('Solo se pueden borrar definitivamente movimientos eliminados que no están en una conciliación activa')
+  const removableIds = removable.map((row) => row.id)
   db.transaction(() => {
-    const placeholders = uniqueIds.map(() => '?').join(',')
-    db.prepare(`DELETE FROM movements WHERE id IN (${placeholders})`).run(...uniqueIds)
+    const placeholders = removableIds.map(() => '?').join(',')
+    db.prepare(`DELETE FROM reconciliation_items WHERE movement_id IN (${placeholders})`).run(...removableIds)
+    db.prepare(`DELETE FROM movements WHERE id IN (${placeholders})`).run(...removableIds)
     db.prepare('INSERT INTO audit (action, detail) VALUES (?, ?)').run(
       'BORRAR',
-      `${uniqueIds.length} movimiento(s) eliminados definitivamente`,
+      `${removableIds.length} movimiento(s) eliminados definitivamente`,
     )
   })()
-  return { deleted: uniqueIds.length }
+  return { deleted: removableIds.length, rejected: rows.length - removableIds.length }
 }
 
 function changeMovementStatus(ids: number[], status: 'PENDIENTE' | 'ELIMINADO', reason: string) {
