@@ -159,3 +159,64 @@ test('filters a partial receipt and an amount, and shows separate balances', asy
   await expect(page.getByRole('cell', { name: 'Saldo libros' })).toBeVisible()
   await expect(page.getByText('Total débitos')).toHaveCount(0)
 })
+
+test('sorts conciliation grids and filters pending rows by concept', async ({ page }) => {
+  await page.goto('/#/conciliar')
+  await expect(page.locator('#r-concepto')).toBeVisible()
+  const pending = page.locator('#pending-grid [data-sel]')
+  await expect(pending.first()).toBeVisible()
+
+  const read = async (name: 'date' | 'amount' | 'notes') =>
+    pending.evaluateAll((rows, key) => rows.map((row) => (row as HTMLElement).dataset[key] ?? ''), name)
+
+  const dateHeader = page.locator('.top-ledger button[data-column="date"]')
+  await dateHeader.click()
+  await expect(dateHeader).toHaveAttribute('aria-sort', 'ascending')
+  assertOrdered(await read('date'), 'asc')
+  await dateHeader.click()
+  await expect(dateHeader).toHaveAttribute('aria-sort', 'descending')
+  assertOrdered(await read('date'), 'desc')
+
+  const amountHeader = page.locator('.top-ledger button[data-column="bank-debit"]')
+  await amountHeader.click()
+  await expect(amountHeader).toHaveAttribute('aria-sort', 'descending')
+  assertOrdered((await read('amount')).map(Number), 'desc')
+  await amountHeader.click()
+  assertOrdered((await read('amount')).map(Number), 'asc')
+
+  const notesHeader = page.locator('.top-ledger button[data-column="notes"]')
+  await notesHeader.click()
+  await expect(notesHeader).toHaveAttribute('aria-sort', 'ascending')
+  assertOrdered(await read('notes'), 'asc', (left, right) => left.localeCompare(right, 'es', { sensitivity: 'base' }))
+  await notesHeader.click()
+  await expect(notesHeader).toHaveAttribute('aria-sort', 'descending')
+  assertOrdered(await read('notes'), 'desc', (left, right) => left.localeCompare(String(right), 'es', { sensitivity: 'base' }))
+
+  await page.locator('#r-concepto').fill('')
+  const stagedTarget = page.locator('#pending-grid [data-sel]').first()
+  await stagedTarget.dblclick()
+  await expect(page.locator('#staged-grid [data-staged-line]')).toHaveCount(1)
+
+  await page.locator('#r-concepto').fill('comp pp')
+  const visibleNotes = await page.locator('#pending-grid [data-sel]').evaluateAll((rows) =>
+    rows.map((row) => (row as HTMLElement).dataset.notes ?? ''))
+  for (const note of visibleNotes) expect(note.toLocaleLowerCase('es')).toContain('comp pp')
+  await expect(page.locator('#staged-grid [data-staged-line]')).toHaveCount(1)
+
+  await page.locator('#r-concepto').fill('texto-que-no-esta-en-ninguna-observacion')
+  await expect(page.locator('#pending-grid [data-sel]')).toHaveCount(0)
+  await expect(page.locator('#staged-grid [data-staged-line]')).toHaveCount(1)
+})
+
+function assertOrdered(
+  values: Array<string | number>,
+  direction: 'asc' | 'desc',
+  compare: (left: string | number, right: string | number) => number = (left, right) =>
+    left < right ? -1 : left > right ? 1 : 0,
+) {
+  for (let index = 1; index < values.length; index += 1) {
+    const compared = compare(values[index - 1], values[index])
+    if (direction === 'asc') expect(compared).toBeLessThanOrEqual(0)
+    else expect(compared).toBeGreaterThanOrEqual(0)
+  }
+}

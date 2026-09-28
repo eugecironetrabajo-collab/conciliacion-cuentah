@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { automaticProposal, balanceSummary, candidateFor } from '../src/reconcile.js'
+import { automaticProposal, balanceSummary, candidateFor, matchesConcept, nextSort, rowAmountCents, sortMovements } from '../src/reconcile.js'
 import { parseAmount, parseText } from '../src/importers.js'
 import type { Movement } from '../src/types.js'
 
@@ -65,6 +65,48 @@ test('N:1 reconciliation creates a debit-book adjustment when credits are greate
   ]
   assert.equal(balanceSummary(rows).adjustmentSide, 'DEBITO_LIBRO')
   assert.equal(balanceSummary(rows).adjustmentCents, 5_000)
+})
+
+test('amount sort reads every column as one value, largest first', () => {
+  const rows = [
+    movement({ id: 1, origin: 'BANCO', debitCents: 2_000 }),
+    movement({ id: 2, origin: 'BANCO', creditCents: 1_500 }),
+    movement({ id: 3, origin: 'LIBRO', debitCents: 1_800 }),
+  ]
+  assert.deepEqual(rows.map(rowAmountCents), [2_000, 1_500, 1_800])
+  const largestFirst = nextSort(null, 'amount', 'bank-debit')
+  assert.equal(largestFirst.direction, 'desc')
+  assert.deepEqual(sortMovements(rows, largestFirst).map((row) => row.id), [1, 3, 2])
+  const smallestFirst = nextSort(largestFirst, 'amount', 'bank-debit')
+  assert.equal(smallestFirst.direction, 'asc')
+  assert.deepEqual(sortMovements(rows, smallestFirst).map((row) => row.id), [2, 3, 1])
+  const otherAmountColumn = nextSort(smallestFirst, 'amount', 'book-debit')
+  assert.equal(otherAmountColumn.direction, 'desc')
+})
+
+test('date sort starts oldest first and concept sort starts A to Z', () => {
+  const rows = [
+    movement({ id: 1, origin: 'LIBRO', date: '2026-03-02', processDate: '2026-09-20', notes: 'COMP PP lote 2' }),
+    movement({ id: 2, origin: 'BANCO', date: '2026-01-15', processDate: '2026-09-01', notes: 'otro' }),
+    movement({ id: 3, origin: 'LIBRO', date: '2026-01-15', processDate: '2026-09-28', notes: 'comp pp adelanto' }),
+  ]
+  const oldest = nextSort(null, 'date', 'date')
+  assert.deepEqual(sortMovements(rows, oldest).map((row) => row.id), [2, 3, 1])
+  const newest = nextSort(oldest, 'date', 'date')
+  assert.deepEqual(sortMovements(rows, newest).map((row) => row.id), [1, 2, 3])
+  const processOldest = nextSort(null, 'processDate', 'processDate')
+  assert.deepEqual(sortMovements(rows, processOldest).map((row) => row.id), [2, 1, 3])
+  const alphabetical = nextSort(null, 'notes', 'notes')
+  assert.equal(alphabetical.direction, 'asc')
+  assert.deepEqual(sortMovements(rows, alphabetical).map((row) => row.id), [3, 1, 2])
+  assert.deepEqual(sortMovements(rows, nextSort(alphabetical, 'notes', 'notes')).map((row) => row.id), [2, 1, 3])
+})
+
+test('concept search matches observaciones without hiding a different case', () => {
+  assert.equal(matchesConcept('COMP PP 1337', 'comp pp'), true)
+  assert.equal(matchesConcept('Pago proveedores', 'comp pp'), false)
+  assert.equal(matchesConcept('Comp Pp parcial', '  COMP PP '), true)
+  assert.equal(matchesConcept('sin concepto', ''), true)
 })
 
 test('Argentine formatted amounts are converted to cents', () => {

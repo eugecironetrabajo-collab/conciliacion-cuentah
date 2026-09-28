@@ -1,4 +1,5 @@
 import './style.css'
+import { matchesConcept, nextSort, rowAmountCents, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
 import { TERMINALS, movementLabel } from '../../src/terminals.js'
 import { api, escapeHtml as esc, getMovements, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
 
@@ -371,6 +372,20 @@ const ledgerColumns = `
   <th class="number">Créditos bancos</th><th class="number">Débitos bancos</th>
   <th class="number">Créditos libros</th><th>Observaciones</th>`
 
+function sortableColumns(grid: 'pending' | 'staged') {
+  const heading = (label: string, key: SortKey, column: string = key, numeric = false) =>
+    `<th class="${numeric ? 'number' : ''}"><button type="button" class="sort-button" data-sort="${key}" data-column="${column}" data-grid="${grid}" data-label="${label}" aria-sort="none">${label}</button></th>`
+  return `
+    ${heading('Fecha', 'date')}
+    ${heading('Fecha proc.', 'processDate')}
+    <th>Terminal</th><th>Comprobante</th><th>Sector</th><th>Orden</th><th>Ref. 1</th><th>Ref. 2</th>
+    ${heading('Débitos libros', 'amount', 'book-debit', true)}
+    ${heading('Créditos bancos', 'amount', 'bank-credit', true)}
+    ${heading('Débitos bancos', 'amount', 'bank-debit', true)}
+    ${heading('Créditos libros', 'amount', 'book-credit', true)}
+    ${heading('Observaciones', 'notes')}`
+}
+
 function ledgerRow(row: Movement, attributes = '', extraClass = '') {
   return `<tr ${attributes} class="${extraClass}">
     <td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(movementLabel(row.origin, row.dealer, row.sector))}</td><td>${esc(row.receipt)}</td>
@@ -386,6 +401,8 @@ function ledgerRow(row: Movement, attributes = '', extraClass = '') {
 async function renderReconcile(root: HTMLElement) {
   let rows = await getMovements('?estado=PENDIENTE')
   const staged = new Set<number>()
+  let pendingSort: ColumnSort | null = null
+  let stagedSort: ColumnSort | null = null
   let stagedAutomatically = false
   let selectedBank: number | null = null
   let selectedBook: number | null = null
@@ -400,6 +417,7 @@ async function renderReconcile(root: HTMLElement) {
       <label>Sector<select id="r-sector"><option value="">Todos los sectores</option></select></label>
       <label>Fecha desde<input id="r-from" type="date"></label>
       <label>Fecha hasta<input id="r-to" type="date"></label>
+      <label>Concepto<input id="r-concepto" type="search" placeholder="comp pp" autocomplete="off"></label>
       <button class="icon-button" id="refresh" aria-label="Actualizar">↻</button>
     </section>
     <section class="quadrant">
@@ -407,7 +425,7 @@ async function renderReconcile(root: HTMLElement) {
         <div><span class="step">1</span><div><h2>Partidas pendientes</h2><p>Doble clic para mover una línea al cuadrante inferior</p></div></div>
         <div class="legend"><span><i class="bank"></i>Banco</span><span><i class="book"></i>Libros</span><b id="pending-count"></b></div>
       </div>
-      <div class="ledger-wrap top-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody id="pending-grid"></tbody></table></div>
+      <div class="ledger-wrap top-ledger"><table class="ledger"><thead><tr>${sortableColumns('pending')}</tr></thead><tbody id="pending-grid"></tbody></table></div>
       <div class="selection-bar" id="selection-bar">
         <div><span class="selection-status">Seleccione dos partidas</span><small>Una bancaria y una contable</small></div>
         <div class="selection-difference" id="selection-difference"></div>
@@ -420,7 +438,7 @@ async function renderReconcile(root: HTMLElement) {
         <div><span class="step green">2</span><div><h2>Conciliación preparada</h2><p>Revise las contrapartidas antes de confirmar</p></div></div>
         <span class="badge pending" id="staged-count">0 partidas</span>
       </div>
-      <div class="ledger-wrap bottom-ledger"><table class="ledger"><thead><tr>${ledgerColumns}<th class="action-col"></th></tr></thead><tbody id="staged-grid"></tbody></table></div>
+      <div class="ledger-wrap bottom-ledger"><table class="ledger"><thead><tr>${sortableColumns('staged')}<th class="action-col"></th></tr></thead><tbody id="staged-grid"></tbody></table></div>
       <div class="ledger-totals">
         <div><span>Total débitos</span><strong id="total-debits">0,00</strong></div>
         <div><span>Total créditos</span><strong id="total-credits">0,00</strong></div>
@@ -428,16 +446,31 @@ async function renderReconcile(root: HTMLElement) {
       </div>
     </section>`
 
+  const paintSort = (grid: 'pending' | 'staged', sort: ColumnSort | null) => {
+    root.querySelectorAll<HTMLButtonElement>(`.sort-button[data-grid="${grid}"]`).forEach((button) => {
+      const active = Boolean(sort && button.dataset.column === sort.column)
+      button.classList.toggle('active', active)
+      const label = button.dataset.label ?? ''
+      button.textContent = active ? `${label} ${sort!.direction === 'asc' ? '↑' : '↓'}` : label
+      button.setAttribute('aria-sort', active ? (sort!.direction === 'asc' ? 'ascending' : 'descending') : 'none')
+    })
+  }
+
   const draw = () => {
-    const available = rows.filter((row) => !staged.has(row.id))
+    const concept = (document.querySelector<HTMLInputElement>('#r-concepto')?.value ?? '')
+    const available = sortMovements(
+      rows.filter((row) => !staged.has(row.id) && matchesConcept(row.notes, concept)),
+      pendingSort,
+    )
     const grid = document.querySelector('#pending-grid')!
     grid.innerHTML = available.length
-      ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" tabindex="0"`, [
+      ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" data-date="${row.date}" data-amount="${rowAmountCents(row)}" data-notes="${esc(row.notes)}" tabindex="0"`, [
           row.id === selectedBank || row.id === selectedBook ? 'selected' : '',
           checked && (row.id === checked.bankId || row.id === checked.bookId) ? 'matched' : '',
         ].join(' '))).join('')
       : `<tr><td colspan="13">${empty('Sin partidas pendientes', 'Importe nuevos movimientos o confirme las partidas preparadas.')}</td></tr>`
     document.querySelector('#pending-count')!.textContent = `${available.length} partidas`
+    paintSort('pending', pendingSort)
     document.querySelectorAll('[data-sel]').forEach((node) => {
       const select = async () => {
         const row = rows.find((item) => item.id === Number((node as HTMLElement).dataset.sel))!
@@ -502,7 +535,8 @@ async function renderReconcile(root: HTMLElement) {
 
   const drawStaged = () => {
     const grid = document.querySelector('#staged-grid')!
-    const stagedRows = rows.filter((row) => staged.has(row.id))
+    const stagedRows = sortMovements(rows.filter((row) => staged.has(row.id)), stagedSort)
+    paintSort('staged', stagedSort)
     grid.innerHTML = stagedRows.length ? stagedRows.map((row) => `<tr class="staged-line" data-staged-line="${row.id}">
       ${ledgerRow(row).replace(/^<tr[^>]*>|<\/tr>$/g, '')}
       <td class="action-col"><button class="remove-pair" data-remove="${row.id}" title="Devolver arriba">↑</button></td>
@@ -557,6 +591,16 @@ async function renderReconcile(root: HTMLElement) {
       openAdjustmentModal(difference, saveReconciliation)
     }
   })
+  root.querySelectorAll<HTMLButtonElement>('.sort-button').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.dataset.sort as SortKey
+      const column = button.dataset.column ?? key
+      if (button.dataset.grid === 'pending') pendingSort = nextSort(pendingSort, key, column)
+      else stagedSort = nextSort(stagedSort, key, column)
+      draw()
+    })
+  })
+  document.querySelector('#r-concepto')!.addEventListener('input', () => draw())
   document.querySelector('#refresh')!.addEventListener('click', async () => {
     rows = await getMovements('?estado=PENDIENTE')
     draw()

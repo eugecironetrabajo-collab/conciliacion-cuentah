@@ -1,7 +1,50 @@
 import type { Candidate, Movement } from './types.js'
 
+export type SortKey = 'date' | 'processDate' | 'amount' | 'notes'
+export type SortDirection = 'asc' | 'desc'
+
+export interface ColumnSort {
+  key: SortKey
+  direction: SortDirection
+  column: string
+}
+
 export function signedAmount(row: Movement) {
   return row.debitCents - row.creditCents
+}
+
+export function rowAmountCents(row: Pick<Movement, 'origin' | 'debitCents' | 'creditCents'>) {
+  if (row.origin === 'LIBRO' && row.debitCents) return Math.abs(row.debitCents)
+  if (row.origin === 'BANCO' && row.creditCents) return Math.abs(row.creditCents)
+  if (row.origin === 'BANCO' && row.debitCents) return Math.abs(row.debitCents)
+  if (row.origin === 'LIBRO' && row.creditCents) return Math.abs(row.creditCents)
+  return 0
+}
+
+export function nextSort(current: ColumnSort | null, key: SortKey, column: string = key): ColumnSort {
+  const first: SortDirection = key === 'amount' ? 'desc' : 'asc'
+  if (!current || current.column !== column) return { key, direction: first, column }
+  return { key, direction: current.direction === 'asc' ? 'desc' : 'asc', column }
+}
+
+export function matchesConcept(notes: string, query: string) {
+  const needle = query.trim().toLocaleLowerCase('es')
+  if (!needle) return true
+  return notes.toLocaleLowerCase('es').includes(needle)
+}
+
+export function sortMovements<T extends Movement>(rows: T[], sort: ColumnSort | null) {
+  if (!sort) return [...rows]
+  const direction = sort.direction === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    let compared = 0
+    if (sort.key === 'date') compared = a.date.localeCompare(b.date)
+    else if (sort.key === 'processDate') compared = a.processDate.localeCompare(b.processDate)
+    else if (sort.key === 'amount') compared = rowAmountCents(a) - rowAmountCents(b)
+    else compared = a.notes.localeCompare(b.notes, 'es', { sensitivity: 'base' })
+    if (compared === 0) return a.id - b.id
+    return compared * direction
+  })
 }
 
 export function balanceSummary(rows: Movement[]) {
