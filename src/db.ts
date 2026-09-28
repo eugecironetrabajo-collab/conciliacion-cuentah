@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { AdjustmentInput, ImportRow, Movement, Origin, ReconciliationRecord } from './types.js'
 import { balanceSummary } from './reconcile.js'
+import { bookFingerprint, bookTerminal, normalizeBookAmounts } from './terminals.js'
 
 const dbPath = resolve(process.env.DB_PATH ?? 'data/conciliacion.db')
 mkdirSync(dirname(dbPath), { recursive: true })
@@ -195,6 +196,25 @@ export function restoreMovements(ids: number[]) {
   return changeMovementStatus(ids, 'PENDIENTE', 'Restauración de movimientos eliminados')
 }
 
+export function purgeMovements(ids: number[]) {
+  const uniqueIds = [...new Set(ids)]
+  if (!uniqueIds.length) throw new Error('Seleccione al menos un movimiento')
+  const rows = getMovements(uniqueIds)
+  if (rows.length !== uniqueIds.length) throw new Error('Uno de los movimientos ya no existe')
+  const linked = db.prepare('SELECT movement_id FROM reconciliation_items WHERE movement_id = ?')
+  const invalid = rows.find((row) => row.status !== 'ELIMINADO' || row.isAdjustment || linked.get(row.id))
+  if (invalid) throw new Error('Solo se pueden borrar definitivamente movimientos eliminados que no pertenecen a una conciliación')
+  db.transaction(() => {
+    const placeholders = uniqueIds.map(() => '?').join(',')
+    db.prepare(`DELETE FROM movements WHERE id IN (${placeholders})`).run(...uniqueIds)
+    db.prepare('INSERT INTO audit (action, detail) VALUES (?, ?)').run(
+      'BORRAR',
+      `${uniqueIds.length} movimiento(s) eliminados definitivamente`,
+    )
+  })()
+  return { deleted: uniqueIds.length }
+}
+
 function changeMovementStatus(ids: number[], status: 'PENDIENTE' | 'ELIMINADO', reason: string) {
   const uniqueIds = [...new Set(ids)]
   if (!uniqueIds.length) throw new Error('Seleccione al menos un movimiento')
@@ -235,17 +255,25 @@ export function listMovements(filters: {
 } = {}) {
   const where: string[] = []
   const params: Record<string, string | number> = {}
-  if (filters.status && filters.status !== 'TODOS') {
-    where.push('status = @status')
-    params.status = filters.status
+  if (filters.status === 'NINGUNO') {
+    where.push('1 = 0')
+  } else if (filters.status && filters.status !== 'TODOS') {
+    const statuses = filters.status.split(',').map((status) => status.trim()).filter((status) =>
+      status === 'PENDIENTE' || status === 'CONCILIADO' || status === 'ELIMINADO',
+    )
+    if (!statuses.length) where.push('1 = 0')
+    else {
+      statuses.forEach((status, index) => { params[`status${index}`] = status })
+      where.push(`status IN (${statuses.map((_, index) => `@status${index}`).join(', ')})`)
+    }
   }
   if (filters.origin && filters.origin !== 'TODOS') {
     where.push('origin = @origin')
     params.origin = filters.origin
   }
   if (filters.dealer) {
-    where.push('dealer = @dealer')
-    params.dealer = filters.dealer
+    where.push(`(',' || dealer || ',') LIKE @dealer`)
+    params.dealer = `%,${filters.dealer},%`
   }
   if (filters.from) {
     where.push('date >= @from')
@@ -498,5 +526,59 @@ if (!processDateBackfill) {
   db.transaction(() => {
     copied.forEach((row) => updateProcessDate.run(loadDate(row.created_at), row.id))
     db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('process_date_backfill', '1')`).run()
+  })()
+}
+
+const bookNormalization = db.prepare(`SELECT value FROM schema_meta WHERE key = 'book_signs_terminals'`).get()
+if (!bookNormalization) {
+  const books = db.prepare(`
+    SELECT id, date, ref1, ref2, debit_cents, credit_cents, notes, sector, dealer
+    FROM movements WHERE origin = 'LIBRO'
+  `).all() as Array<{
+    id: number
+    date: string
+    ref1: string
+    ref2: string
+    debit_cents: number
+    credit_cents: number
+    notes: string
+    sector: string
+    dealer: string
+  }>
+  const updateBook = db.prepare(`
+    UPDATE movements
+    SET debit_cents = @debitCents, credit_cents = @creditCents, dealer = @dealer, fingerprint = @fingerprint
+    WHERE id = @id
+  `)
+  const removeBook = db.prepare('DELETE FROM movements WHERE id = ?')
+  const linkedBook = db.prepare('SELECT 1 FROM reconciliation_items WHERE movement_id = ?')
+  const fingerprintOwner = db.prepare('SELECT id FROM movements WHERE fingerprint = ?')
+  db.transaction(() => {
+    books.forEach((row) => {
+      const terminal = bookTerminal(row.sector, row.notes)
+      if (terminal.skip && !linkedBook.get(row.id)) {
+        removeBook.run(row.id)
+        return
+      }
+      const amounts = normalizeBookAmounts(row.debit_cents, row.credit_cents)
+      const dealer = terminal.dealer || row.dealer
+      let fingerprint = bookFingerprint(row.date, row.ref1, row.ref2, amounts.debitCents, amounts.creditCents, row.notes, dealer)
+      const owner = fingerprintOwner.get(fingerprint) as { id: number } | undefined
+      if (owner && owner.id !== row.id) {
+        if (!linkedBook.get(row.id)) {
+          removeBook.run(row.id)
+          return
+        }
+        fingerprint = `${fingerprint}|${row.id}`
+      }
+      updateBook.run({
+        id: row.id,
+        debitCents: amounts.debitCents,
+        creditCents: amounts.creditCents,
+        dealer,
+        fingerprint,
+      })
+    })
+    db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('book_signs_terminals', '1')`).run()
   })()
 }

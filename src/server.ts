@@ -6,6 +6,7 @@ import {
   auditRows,
   confirmReconciliation,
   deleteMovements,
+  purgeMovements,
   getReconciliation,
   importBatches,
   listMovements,
@@ -124,6 +125,14 @@ app.post('/api/movimientos/restaurar', (req, res) => {
   try {
     const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number) : []
     res.json(ok(restoreMovements(ids)))
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+})
+app.post('/api/movimientos/borrar', (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number) : []
+    res.json(ok(purgeMovements(ids)))
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
   }

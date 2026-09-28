@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx'
+import { bookFingerprint, bookTerminal, normalizeBookAmounts } from './terminals.js'
 import type { ImportRow, Origin } from './types.js'
 
 export interface ParsedImport {
@@ -196,16 +197,24 @@ function parseQuiter(buffer: Buffer): ParsedImport {
     try {
       const date = parseDate(rawDate)
       const identity = bookIdentity(concept)
-      const debitCents = parseAmount(row[indexes.debit])
-      const creditCents = parseAmount(row[indexes.credit])
-      if (!debitCents && !creditCents) {
+      const parsedDebit = parseAmount(row[indexes.debit])
+      const parsedCredit = parseAmount(row[indexes.credit])
+      if (!parsedDebit && !parsedCredit) {
         skipped += 1
         return
       }
       const reference = indexes.reference >= 0 ? String(row[indexes.reference] ?? '').trim() : ''
       const documentNo = indexes.document >= 0 ? String(row[indexes.document] ?? '').trim() : ''
-      const dealer = indexes.dealer >= 0 ? String(row[indexes.dealer] ?? '').trim() : ''
+      const personalAccount = indexes.dealer >= 0 ? String(row[indexes.dealer] ?? '').trim() : ''
       const account = indexes.account >= 0 ? String(row[indexes.account] ?? '').trim() : ''
+      const terminal = bookTerminal(account, concept)
+      if (terminal.skip) {
+        skipped += 1
+        errors.push(`Fila ${excelRow}: la cuenta ${account} no debe tener importes`)
+        return
+      }
+      const { debitCents, creditCents } = normalizeBookAmounts(parsedDebit, parsedCredit)
+      const dealer = terminal.dealer || personalAccount || '6'
       rows.push({
         origin: 'LIBRO',
         date,
@@ -218,8 +227,8 @@ function parseQuiter(buffer: Buffer): ParsedImport {
         debitCents,
         creditCents,
         notes: concept,
-        dealer: dealer || '6',
-        fingerprint: fingerprint(['LIBRO', date, reference, documentNo, debitCents, creditCents, concept, dealer]),
+        dealer,
+        fingerprint: bookFingerprint(date, reference, documentNo, debitCents, creditCents, concept, dealer),
       })
     } catch (error) {
       errors.push(`Fila ${excelRow}: ${error instanceof Error ? error.message : error}`)

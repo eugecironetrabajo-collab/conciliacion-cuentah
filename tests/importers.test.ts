@@ -70,8 +70,10 @@ test('Quiter workbook skips structural rows and preserves signed amounts', () =>
   assert.equal(invoice.ref1, '10721870/1')
   assert.equal(invoice.ref2, '10721870')
   assert.equal(invoice.creditCents, 3_027_000)
-  assert.equal(invoice.dealer, '6')
-  assert.equal(credit.creditCents, -175_274_173)
+  assert.equal(invoice.dealer, '1337')
+  assert.equal(credit.debitCents, 175_274_173)
+  assert.equal(credit.creditCents, 0)
+  assert.equal(credit.dealer, '1337,3550')
 })
 
 test('reimporting is idempotent and deleted movements can be restored', async () => {
