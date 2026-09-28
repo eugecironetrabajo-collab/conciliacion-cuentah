@@ -38,14 +38,11 @@ DB_PATH=/ruta/cuenta-h.db npm run dev
 
 ## Formatos de importación
 
-Se aceptan `.txt`, `.csv`, `.xls` y `.xlsx`. Los encabezados se reconocen mediante alias, entre ellos:
+Los TXT bancarios de Cuenta H son archivos de ancho fijo en Windows-1252. Se leen únicamente las líneas de la cuenta `41110100`, con fecha `F.Valor` (`AAMMDD`), documento, tipo, detalle e importes. Puede seleccionar varios TXT juntos: un movimiento repetido entre archivos se guarda una sola vez.
 
-- `Fecha`, `Fecha proc.`, `Comprobante`, `Sector`, `Orden`
-- `Ref. 1`, `Ref. 2`
-- `Débitos Libros`, `Créditos Bancos`, `Débitos Bancos`, `Créditos Libros`
-- `Observaciones`, `Banco` o `Dealer`
+El mayor contable es el Excel de Quiter (hoja `Informe`). Se importan las filas de movimientos y se omiten saldos, títulos y separadores. Las columnas usadas son `Fecha`, `Referencia`, `Concepto del apunte`, `Nro.docum`, `Debe`, `Haber` y `Cta.pers.`.
 
-TXT y CSV pueden estar separados por punto y coma, tabulación o coma. Fechas admitidas: `DD/MM/AAAA` o `AAAA-MM-DD`. Los duplicados se omiten.
+También se aceptan CSV delimitados para cargas auxiliares. Volver a importar un archivo no duplica movimientos ni ejecuta la conciliación. Desde **Movimientos** se pueden eliminar lógicamente partidas pendientes, indicando un motivo, y restaurarlas después.
 
 ## Comandos
 

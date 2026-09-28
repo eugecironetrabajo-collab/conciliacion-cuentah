@@ -42,6 +42,7 @@ export interface ImportRow {
   creditCents?: number
   notes?: string
   dealer?: string
+  fingerprint?: string
 }
 
 export interface AdjustmentInput {

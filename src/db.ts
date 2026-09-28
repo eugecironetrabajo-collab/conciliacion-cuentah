@@ -108,19 +108,19 @@ const mapMovement = (row: Record<string, unknown>): Movement => ({
   isAdjustment: Boolean(row.is_adjustment),
 })
 
-const fingerprint = (row: ImportRow) =>
-  [
-    row.origin,
-    row.date,
-    row.processDate ?? row.date,
-    row.receipt ?? '',
-    row.orderNo ?? '',
-    row.ref1 ?? '',
-    row.ref2 ?? '',
-    row.debitCents ?? 0,
-    row.creditCents ?? 0,
-    row.dealer ?? '6',
-  ].join('|')
+const fingerprint = (row: ImportRow) => row.fingerprint ?? JSON.stringify([
+  row.origin,
+  row.date,
+  row.processDate ?? row.date,
+  row.receipt ?? '',
+  row.orderNo ?? '',
+  row.ref1 ?? '',
+  row.ref2 ?? '',
+  row.debitCents ?? 0,
+  row.creditCents ?? 0,
+  row.notes ?? '',
+  row.dealer ?? '6',
+])
 
 const insertStatement = db.prepare(`
   INSERT OR IGNORE INTO movements (
@@ -132,30 +132,76 @@ const insertStatement = db.prepare(`
   )
 `)
 
+const movementValues = (row: ImportRow) => ({
+  origin: row.origin,
+  date: row.date,
+  processDate: row.processDate ?? row.date,
+  receipt: row.receipt ?? '',
+  sector: row.sector ?? '',
+  orderNo: row.orderNo ?? '',
+  ref1: row.ref1 ?? '',
+  ref2: row.ref2 ?? '',
+  debitCents: row.debitCents ?? 0,
+  creditCents: row.creditCents ?? 0,
+  notes: row.notes ?? '',
+  dealer: row.dealer ?? '6',
+  fingerprint: fingerprint(row),
+})
+
 export function insertMovements(rows: ImportRow[]) {
-  let inserted = 0
-  const insertMany = db.transaction(() => {
-    for (const row of rows) {
-      const result = insertStatement.run({
-        origin: row.origin,
-        date: row.date,
-        processDate: row.processDate ?? row.date,
-        receipt: row.receipt ?? '',
-        sector: row.sector ?? '',
-        orderNo: row.orderNo ?? '',
-        ref1: row.ref1 ?? '',
-        ref2: row.ref2 ?? '',
-        debitCents: row.debitCents ?? 0,
-        creditCents: row.creditCents ?? 0,
-        notes: row.notes ?? '',
-        dealer: row.dealer ?? '6',
-        fingerprint: fingerprint(row),
-      })
-      inserted += result.changes
-    }
-  })
-  insertMany()
-  return { inserted, duplicates: rows.length - inserted, total: rows.length }
+  return importBatches([{ name: 'archivo', rows }])[0]
+}
+
+export function importBatches(files: Array<{ name: string; rows: ImportRow[] }>) {
+  return db.transaction(() => {
+    const seen = new Set(
+      (db.prepare('SELECT fingerprint FROM movements').all() as Array<{ fingerprint: string }>).map((row) => row.fingerprint),
+    )
+    return files.map((file) => {
+      let inserted = 0
+      let duplicates = 0
+      for (const row of file.rows) {
+        const values = movementValues(row)
+        if (seen.has(values.fingerprint)) {
+          duplicates += 1
+          continue
+        }
+        insertStatement.run(values)
+        seen.add(values.fingerprint)
+        inserted += 1
+      }
+      return { name: file.name, inserted, duplicates, total: file.rows.length }
+    })
+  })()
+}
+
+export function deleteMovements(ids: number[], reason: string) {
+  return changeMovementStatus(ids, 'ELIMINADO', reason)
+}
+
+export function restoreMovements(ids: number[]) {
+  return changeMovementStatus(ids, 'PENDIENTE', 'Restauración de movimientos eliminados')
+}
+
+function changeMovementStatus(ids: number[], status: 'PENDIENTE' | 'ELIMINADO', reason: string) {
+  const uniqueIds = [...new Set(ids)]
+  if (!uniqueIds.length) throw new Error('Seleccione al menos un movimiento')
+  if (status === 'ELIMINADO' && !reason.trim()) throw new Error('Indique el motivo de la eliminación')
+  const rows = getMovements(uniqueIds)
+  if (rows.length !== uniqueIds.length) throw new Error('Uno de los movimientos ya no existe')
+  const invalid = rows.find((row) =>
+    row.isAdjustment || (status === 'ELIMINADO' ? row.status !== 'PENDIENTE' : row.status !== 'ELIMINADO'),
+  )
+  if (invalid) throw new Error('Solo se pueden gestionar movimientos importados en el estado correspondiente')
+  db.transaction(() => {
+    const placeholders = uniqueIds.map(() => '?').join(',')
+    db.prepare(`UPDATE movements SET status = ? WHERE id IN (${placeholders})`).run(status, ...uniqueIds)
+    db.prepare('INSERT INTO audit (action, detail) VALUES (?, ?)').run(
+      status === 'ELIMINADO' ? 'ELIMINAR' : 'RESTAURAR',
+      `${uniqueIds.length} movimiento(s): ${reason.trim()}`,
+    )
+  })()
+  return { updated: uniqueIds.length, status }
 }
 
 export function listMovements(filters: {

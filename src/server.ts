@@ -5,14 +5,16 @@ import { resolve } from 'node:path'
 import {
   auditRows,
   confirmReconciliation,
+  deleteMovements,
   getReconciliation,
-  insertMovements,
+  importBatches,
   listMovements,
+  restoreMovements,
   reverseReconciliation,
   statusSummary,
   unreconcile,
 } from './db.js'
-import { parseText, parseWorkbook } from './importers.js'
+import { parseBankFile, parseBookFile } from './importers.js'
 import { automaticProposal, candidateFor, findCandidates } from './reconcile.js'
 
 const app = express()
@@ -110,15 +112,51 @@ app.post('/api/unreconcile', (req, res) => {
   }
 })
 
-app.post('/api/import/:origin', upload.single('file'), (req, res) => {
+app.post('/api/movimientos/eliminar', (req, res) => {
   try {
-    if (!req.file) throw new Error('Seleccione un archivo')
+    const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number) : []
+    res.json(ok(deleteMovements(ids, String(req.body.motivo ?? ''))))
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+})
+app.post('/api/movimientos/restaurar', (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number) : []
+    res.json(ok(restoreMovements(ids)))
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.post('/api/import/:origin', upload.any(), (req, res) => {
+  try {
+    const files = ((req.files ?? []) as Express.Multer.File[]).filter((file) => file.fieldname === 'files' || file.fieldname === 'file')
+    if (!files.length) throw new Error('Seleccione un archivo')
     const origin = req.params.origin === 'banco' ? 'BANCO' : req.params.origin === 'libro' ? 'LIBRO' : null
     if (!origin) throw new Error('Origen inválido')
-    const isText = /\.(txt|csv)$/i.test(req.file.originalname)
-    const rows = isText ? parseText(req.file.buffer, origin) : parseWorkbook(req.file.buffer, origin)
-    const result = insertMovements(rows)
-    res.json(ok({ ...result, pending: true }))
+    const parsed = files.map((file) => {
+      const result = origin === 'BANCO' ? parseBankFile(file.buffer, file.originalname) : parseBookFile(file.buffer, file.originalname)
+      return { name: file.originalname, ...result }
+    })
+    const stored = importBatches(parsed.map((file) => ({ name: file.name, rows: file.rows })))
+    const filesResult = parsed.map((file, index) => ({
+      name: file.name,
+      inserted: stored[index].inserted,
+      duplicates: file.duplicatesInFile + stored[index].duplicates,
+      skipped: file.skipped,
+      errors: file.errors,
+      total: file.rows.length + file.duplicatesInFile,
+    }))
+    res.json(ok({
+      pending: true,
+      reconciled: false,
+      files: filesResult,
+      inserted: filesResult.reduce((sum, file) => sum + file.inserted, 0),
+      duplicates: filesResult.reduce((sum, file) => sum + file.duplicates, 0),
+      skipped: filesResult.reduce((sum, file) => sum + file.skipped, 0),
+      errors: filesResult.flatMap((file) => file.errors.map((error) => `${file.name}: ${error}`)),
+    }))
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
   }

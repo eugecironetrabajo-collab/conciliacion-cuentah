@@ -152,17 +152,21 @@ async function renderMovements(root: HTMLElement) {
       <div class="filter-options">
         <fieldset><legend>Origen</legend><label><input type="radio" name="f-origen" value="BANCO"> Banco</label><label><input type="radio" name="f-origen" value="LIBRO"> Contabilidad</label><label><input type="radio" name="f-origen" value="TODOS" checked> Ambos</label></fieldset>
         <fieldset><legend>Signo</legend><label><input type="radio" name="f-signo" value="DEBITO"> Débitos</label><label><input type="radio" name="f-signo" value="CREDITO"> Créditos</label><label><input type="radio" name="f-signo" value="" checked> Ambos</label></fieldset>
-        <fieldset><legend>Estado</legend><label><input type="radio" name="f-estado" value="PENDIENTE"> Pendientes</label><label><input type="radio" name="f-estado" value="CONCILIADO"> Conciliados</label><label><input type="radio" name="f-estado" value="TODOS" checked> Ambos</label></fieldset>
+        <fieldset><legend>Estado</legend><label><input type="radio" name="f-estado" value="PENDIENTE"> Pendientes</label><label><input type="radio" name="f-estado" value="CONCILIADO"> Conciliados</label><label><input type="radio" name="f-estado" value="ELIMINADO"> Eliminados</label><label><input type="radio" name="f-estado" value="TODOS" checked> Todos</label></fieldset>
       </div>
       <div class="filter-actions"><button class="button secondary" id="f-limpiar">Limpiar</button><button class="button primary" id="f-aplicar">Buscar partidas</button></div>
     </section>
     <section class="panel table-panel">
-      <div class="panel-head"><div><h2>Partidas encontradas</h2><p><span id="row-count">${rows.length}</span> resultados · Doble clic para consultar una conciliación</p></div></div>
-      <div class="table-scroll"><table class="standard-table"><thead><tr><th>ID</th><th>Origen</th><th>Estado</th><th>Fecha</th><th>Comprobante</th><th>Referencia</th><th>Detalle</th><th class="number">Débito</th><th class="number">Crédito</th><th>Acción</th></tr></thead><tbody id="movement-body"></tbody></table></div>
+      <div class="panel-head"><div><h2>Partidas encontradas</h2><p><span id="row-count">${rows.length}</span> resultados · Doble clic para consultar una conciliación</p></div>
+        <div class="bulk-actions"><label><input id="select-visible" type="checkbox"> Seleccionar</label><button class="button secondary" id="delete-selected" disabled>Eliminar</button><button class="button secondary" id="restore-selected" disabled>Restaurar</button></div>
+      </div>
+      <div class="table-scroll"><table class="standard-table"><thead><tr><th></th><th>ID</th><th>Origen</th><th>Estado</th><th>Fecha</th><th>Comprobante</th><th>Referencia</th><th>Detalle</th><th class="number">Débito</th><th class="number">Crédito</th><th>Acción</th></tr></thead><tbody id="movement-body"></tbody></table></div>
     </section><div id="modal-root"></div>`
   const draw = (items: Movement[]) => {
     document.querySelector('#row-count')!.textContent = String(items.length)
+    const manageable = (row: Movement) => !row.isAdjustment && (row.status === 'PENDIENTE' || row.status === 'ELIMINADO')
     document.querySelector('#movement-body')!.innerHTML = items.map((row) => `<tr ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
+      <td>${manageable(row) ? `<input class="row-check" type="checkbox" data-id="${row.id}" data-status="${row.status}" aria-label="Seleccionar movimiento ${row.id}">` : ''}</td>
       <td class="muted">#${row.id}</td><td><span class="origin-label ${row.origin.toLowerCase()}">${row.origin}</span></td>
       <td>${statusBadge(row.status)}</td><td>${shortDate(row.date)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
       <td class="mono">${esc(row.ref1 || row.ref2 || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
@@ -176,6 +180,48 @@ async function renderMovements(root: HTMLElement) {
       row.addEventListener('keydown', (event) => {
         if ((event as KeyboardEvent).key === 'Enter') open()
       })
+    })
+    const selected = () => [...document.querySelectorAll<HTMLInputElement>('.row-check:checked')]
+    const refreshBulk = () => {
+      const checks = selected()
+      document.querySelector<HTMLButtonElement>('#delete-selected')!.disabled = !checks.some((check) => check.dataset.status === 'PENDIENTE')
+      document.querySelector<HTMLButtonElement>('#restore-selected')!.disabled = !checks.some((check) => check.dataset.status === 'ELIMINADO')
+    }
+    const selectVisible = document.querySelector<HTMLInputElement>('#select-visible')!
+    selectVisible.onchange = () => {
+      document.querySelectorAll<HTMLInputElement>('.row-check').forEach((check) => { check.checked = selectVisible.checked })
+      refreshBulk()
+    }
+    document.querySelectorAll('.row-check').forEach((check) => check.addEventListener('change', refreshBulk))
+    document.querySelector<HTMLButtonElement>('#delete-selected')!.onclick = () => {
+      openDeleteModal(selected().filter((check) => check.dataset.status === 'PENDIENTE').map((check) => Number(check.dataset.id)))
+    }
+    document.querySelector<HTMLButtonElement>('#restore-selected')!.onclick = async () => {
+      const ids = selected().filter((check) => check.dataset.status === 'ELIMINADO').map((check) => Number(check.dataset.id))
+      await api('/api/movimientos/restaurar', { method: 'POST', body: JSON.stringify({ ids }) })
+      await renderMovements(root)
+      toast(`${ids.length} movimiento(s) restaurados a pendientes`)
+    }
+  }
+  const openDeleteModal = (ids: number[]) => {
+    const modal = document.createElement('div')
+    modal.className = 'modal-backdrop'
+    modal.innerHTML = `<section class="modal"><div class="modal-head"><div><span class="eyebrow">Eliminación lógica</span><h2>Eliminar ${ids.length} movimiento(s)</h2><p>Quedarán ocultos de la conciliación y podrán restaurarse.</p></div><button class="modal-close">×</button></div>
+      <label class="reason-field">Motivo obligatorio<textarea id="delete-reason" rows="3"></textarea></label>
+      <div class="modal-actions"><button class="button secondary modal-close">Cancelar</button><button class="button danger-button" id="confirm-delete">Eliminar</button></div></section>`
+    document.body.append(modal)
+    const close = () => modal.remove()
+    modal.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', close))
+    modal.querySelector('#confirm-delete')!.addEventListener('click', async () => {
+      const motivo = (modal.querySelector('#delete-reason') as HTMLTextAreaElement).value.trim()
+      if (!motivo) {
+        toast('Indique el motivo de la eliminación', 'error')
+        return
+      }
+      await api('/api/movimientos/eliminar', { method: 'POST', body: JSON.stringify({ ids, motivo }) })
+      close()
+      await renderMovements(root)
+      toast(`${ids.length} movimiento(s) eliminados`)
     })
   }
   draw(rows)
@@ -508,26 +554,41 @@ function renderImport(root: HTMLElement) {
     <section class="import-grid">
       <article class="panel upload-card">
         <span class="upload-icon bank">B</span><h2>Movimientos bancarios</h2><p>Listado Stellantis en TXT, CSV, XLS o XLSX.</p>
-        <label class="dropzone" id="dz-txt"><input type="file" accept=".txt,.csv,.xls,.xlsx" data-origin="banco"><span>↑</span><b>Seleccione o arrastre un archivo</b><small>Máximo 15 MB</small></label>
+        <label class="dropzone" id="dz-txt"><input type="file" accept=".txt,.csv" data-origin="banco" multiple><span>↑</span><b>Seleccione uno o varios TXT</b><small>Se eliminan duplicados entre archivos</small></label>
+        <p class="selected-files" data-names="banco"></p>
         <div class="upload-result" data-result="banco"></div>
       </article>
       <article class="panel upload-card">
         <span class="upload-icon book">L</span><h2>Mayor contable</h2><p>Exportación Quiter en XLS, XLSX, TXT o CSV.</p>
-        <label class="dropzone" id="dz-xls"><input type="file" accept=".txt,.csv,.xls,.xlsx" data-origin="libro"><span>↑</span><b>Seleccione o arrastre un archivo</b><small>Máximo 15 MB</small></label>
+        <label class="dropzone" id="dz-xls"><input type="file" accept=".xls,.xlsx" data-origin="libro"><span>↑</span><b>Seleccione el Excel de Quiter</b><small>Hoja Informe · XLS o XLSX</small></label>
         <div class="upload-result" data-result="libro"></div>
       </article>
     </section>`
   document.querySelectorAll<HTMLInputElement>('input[type=file]').forEach((input) => input.addEventListener('change', async () => {
-    const file = input.files?.[0]
-    if (!file) return
+    const files = [...(input.files ?? [])]
+    if (!files.length) return
     const origin = input.dataset.origin!
+    const names = document.querySelector(`[data-names="${origin}"]`)
+    if (names) names.textContent = files.map((file) => file.name).join(' · ')
     const result = document.querySelector(`[data-result="${origin}"]`)!
     result.innerHTML = '<span class="mini-loader"></span> Procesando archivo…'
     const data = new FormData()
-    data.append('file', file)
+    files.forEach((file) => data.append('files', file))
     try {
-      const imported = await api<{ inserted: number; duplicates: number; pending: boolean }>(`/api/import/${origin}`, { method: 'POST', body: data })
-      result.innerHTML = `<div class="success-result"><b>${imported.inserted} partidas nuevas</b><span>${imported.duplicates} duplicadas omitidas · Estado: pendiente</span></div>`
+      const imported = await api<{
+        inserted: number
+        duplicates: number
+        skipped: number
+        pending: boolean
+        reconciled: boolean
+        errors: string[]
+        files: Array<{ name: string; inserted: number; duplicates: number; skipped: number; errors: string[] }>
+      }>(`/api/import/${origin}`, { method: 'POST', body: data })
+      result.innerHTML = `<div class="success-result"><b>${imported.inserted} partidas nuevas · pendientes</b><span>${imported.duplicates} duplicadas · ${imported.skipped} omitidas · Sin conciliación automática</span></div>
+        <table class="import-summary"><thead><tr><th>Archivo</th><th>Nuevas</th><th>Duplicadas</th><th>Omitidas</th><th>Errores</th></tr></thead><tbody>
+        ${imported.files.map((file) => `<tr><td>${esc(file.name)}</td><td>${file.inserted}</td><td>${file.duplicates}</td><td>${file.skipped}</td><td>${file.errors.length}</td></tr>`).join('')}
+        </tbody></table>
+        ${imported.errors.length ? `<div class="error-result">${imported.errors.slice(0, 4).map(esc).join('<br>')}</div>` : ''}`
       toast('Archivo importado. No se ejecutó ninguna conciliación.')
     } catch (error) {
       result.innerHTML = `<div class="error-result">${esc(error instanceof Error ? error.message : error)}</div>`
