@@ -98,20 +98,49 @@ async function render() {
 
 async function renderSummary(root: HTMLElement) {
   const [status, rows] = await Promise.all([
-    api<{ db: string; counts: Array<{ origin: string; status: string; count: number }>; totals: { debits: number; credits: number } }>('/api/status'),
+    api<{
+      db: string
+      counts: Array<{ origin: string; status: string; count: number }>
+      statement: {
+        bankDebits: number
+        bankDebitCount: number
+        bankCredits: number
+        bankCreditCount: number
+        bookDebits: number
+        bookDebitCount: number
+        bookCredits: number
+        bookCreditCount: number
+        bankBalance: number
+        bookBalance: number
+      }
+    }>('/api/status'),
     getMovements(),
   ])
   const pending = rows.filter((row) => row.status === 'PENDIENTE').length
   const reconciled = rows.filter((row) => row.status === 'CONCILIADO').length
   const reconciliations = new Set(rows.filter((row) => row.reconciliationId).map((row) => row.reconciliationId)).size
   const latest = [...rows].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5)
+  const statement = status.statement
+  const amountCell = (cents: number) => `<td class="number ${cents < 0 ? 'negative' : ''}">$ ${money(cents)}</td>`
   root.innerHTML = `
-    ${heading('Panel general', 'Resumen de Cuenta H', 'Estado de la conciliación y actividad reciente.', '<a class="button primary" href="#/conciliar">Abrir conciliación <span>→</span></a>')}
-    <section class="metrics">
+    ${heading('Panel general', 'Resumen de Cuenta H', 'Saldos de banco y de libros por separado. No se suman entre sí.', '<a class="button primary" href="#/conciliar">Abrir conciliación <span>→</span></a>')}
+    <section class="metrics summary-metrics">
       <article><div class="metric-icon blue">≡</div><span>Partidas pendientes</span><strong>${pending}</strong><small>Requieren revisión</small></article>
       <article><div class="metric-icon green">✓</div><span>Conciliaciones</span><strong>${reconciliations}</strong><small>${reconciled} partidas procesadas</small></article>
-      <article><div class="metric-icon amber">∑</div><span>Total débitos</span><strong>$ ${money(Number(status.totals.debits ?? 0))}</strong><small>Banco y libros</small></article>
-      <article><div class="metric-icon ink">⇄</div><span>Diferencia global</span><strong>$ ${money(Math.abs(Number(status.totals.debits ?? 0) - Number(status.totals.credits ?? 0)))}</strong><small>Débitos contra créditos</small></article>
+    </section>
+    <section class="panel balance-sheet">
+      <div class="panel-head"><div><h2>Saldos de la cuenta</h2><p>Débitos y créditos de cada origen, sin mezclarlos</p></div></div>
+      <table>
+        <thead><tr><th>Concepto</th><th class="number">Partidas</th><th class="number">Importe</th></tr></thead>
+        <tbody>
+          <tr class="total"><td>Saldo banco</td><td class="number"></td>${amountCell(statement.bankBalance)}</tr>
+          <tr><td>(+) Débitos libros</td><td class="number">${statement.bookDebitCount}</td>${amountCell(statement.bookDebits)}</tr>
+          <tr><td>(−) Créditos bancos</td><td class="number">${statement.bankCreditCount}</td>${amountCell(statement.bankCredits)}</tr>
+          <tr><td>(+) Débitos bancos</td><td class="number">${statement.bankDebitCount}</td>${amountCell(statement.bankDebits)}</tr>
+          <tr><td>(−) Créditos libros</td><td class="number">${statement.bookCreditCount}</td>${amountCell(statement.bookCredits)}</tr>
+          <tr class="total"><td>Saldo libros</td><td class="number"></td>${amountCell(statement.bookBalance)}</tr>
+        </tbody>
+      </table>
     </section>
     <section class="panel">
       <div class="panel-head"><div><h2>Actividad reciente</h2><p>Últimas partidas incorporadas al sistema</p></div><a href="#/movimientos">Ver todas →</a></div>
@@ -160,7 +189,7 @@ async function renderMovements(root: HTMLElement) {
       <div class="panel-head"><div><h2>Partidas encontradas</h2><p><span id="row-count">${rows.length}</span> resultados · Doble clic para consultar una conciliación</p></div>
         <div class="bulk-actions"><label><input id="select-visible" type="checkbox"> Seleccionar</label><button class="button secondary" id="delete-selected" disabled>Eliminar</button><button class="button secondary" id="restore-selected" disabled>Restaurar</button></div>
       </div>
-      <div class="table-scroll"><table class="standard-table"><thead><tr><th></th><th>ID</th><th>Origen</th><th>Estado</th><th>Fecha</th><th>Comprobante</th><th>Referencia</th><th>Detalle</th><th class="number">Débito</th><th class="number">Crédito</th><th>Acción</th></tr></thead><tbody id="movement-body"></tbody></table></div>
+      <div class="table-scroll"><table class="standard-table"><thead><tr><th></th><th>ID</th><th>Origen</th><th>Estado</th><th>Fecha</th><th>Fecha proc.</th><th>Comprobante</th><th>Referencia</th><th>Detalle</th><th class="number">Débito</th><th class="number">Crédito</th><th>Acción</th></tr></thead><tbody id="movement-body"></tbody></table></div>
     </section><div id="modal-root"></div>`
   const draw = (items: Movement[]) => {
     document.querySelector('#row-count')!.textContent = String(items.length)
@@ -168,7 +197,7 @@ async function renderMovements(root: HTMLElement) {
     document.querySelector('#movement-body')!.innerHTML = items.map((row) => `<tr ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
       <td>${manageable(row) ? `<input class="row-check" type="checkbox" data-id="${row.id}" data-status="${row.status}" aria-label="Seleccionar movimiento ${row.id}">` : ''}</td>
       <td class="muted">#${row.id}</td><td><span class="origin-label ${row.origin.toLowerCase()}">${row.origin}</span></td>
-      <td>${statusBadge(row.status)}</td><td>${shortDate(row.date)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
+      <td>${statusBadge(row.status)}</td><td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
       <td class="mono">${esc(row.ref1 || row.ref2 || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
       <td class="number">${row.debitCents ? money(row.debitCents) : '—'}</td><td class="number">${row.creditCents ? money(row.creditCents) : '—'}</td>
       <td>${row.status === 'CONCILIADO' ? `<button class="text-button" data-open="${row.reconciliationId}">Ver #${row.reconciliationId}</button>` : `<a class="text-button" href="#/conciliar">Conciliar</a>`}</td>
@@ -226,20 +255,24 @@ async function renderMovements(root: HTMLElement) {
   }
   draw(rows)
   document.querySelector('#f-aplicar')?.addEventListener('click', async () => {
-    const params = new URLSearchParams()
-    const inputValue = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value
-    const radioValue = (name: string) => (document.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement).value
-    const values = [
-      ['dealer', inputValue('#f-dealer')], ['sector', inputValue('#f-sector')],
-      ['orden', inputValue('#f-orden')], ['comprobante', inputValue('#f-comprobante')],
-      ['importeDesde', inputValue('#f-importe-desde')], ['importeHasta', inputValue('#f-importe-hasta')],
-      ['desde', inputValue('#f-desde')], ['hasta', inputValue('#f-hasta')],
-      ['procesoDesde', inputValue('#f-proceso-desde')], ['procesoHasta', inputValue('#f-proceso-hasta')],
-      ['ref1', inputValue('#f-ref1')], ['ref2', inputValue('#f-ref2')],
-      ['origen', radioValue('f-origen')], ['signo', radioValue('f-signo')], ['estado', radioValue('f-estado')],
-    ]
-    values.forEach(([key, value]) => value && params.set(key, value))
-    draw(await getMovements(`?${params}`))
+    try {
+      const params = new URLSearchParams()
+      const inputValue = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value
+      const radioValue = (name: string) => (document.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement).value
+      const values = [
+        ['dealer', inputValue('#f-dealer')], ['sector', inputValue('#f-sector')],
+        ['orden', inputValue('#f-orden')], ['comprobante', inputValue('#f-comprobante')],
+        ['importeDesde', inputValue('#f-importe-desde')], ['importeHasta', inputValue('#f-importe-hasta')],
+        ['desde', inputValue('#f-desde')], ['hasta', inputValue('#f-hasta')],
+        ['procesoDesde', inputValue('#f-proceso-desde')], ['procesoHasta', inputValue('#f-proceso-hasta')],
+        ['ref1', inputValue('#f-ref1')], ['ref2', inputValue('#f-ref2')],
+        ['origen', radioValue('f-origen')], ['signo', radioValue('f-signo')], ['estado', radioValue('f-estado')],
+      ]
+      values.forEach(([key, value]) => value && params.set(key, value))
+      draw(await getMovements(`?${params}`))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'No se pudo buscar', 'error')
+    }
   })
   document.querySelector('#f-limpiar')?.addEventListener('click', () => renderMovements(root))
 }

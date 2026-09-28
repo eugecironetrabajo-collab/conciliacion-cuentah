@@ -9,6 +9,18 @@ mkdirSync(dirname(dbPath), { recursive: true })
 export const db = new Database(dbPath)
 db.pragma('journal_mode = WAL')
 
+export const loadDate = (value: Date | string = new Date()) => {
+  const date = typeof value === 'string'
+    ? new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`)
+    : value
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date)
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS movements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,7 +147,7 @@ const insertStatement = db.prepare(`
 const movementValues = (row: ImportRow) => ({
   origin: row.origin,
   date: row.date,
-  processDate: row.processDate ?? row.date,
+  processDate: loadDate(),
   receipt: row.receipt ?? '',
   sector: row.sector ?? '',
   orderNo: row.orderNo ?? '',
@@ -222,7 +234,7 @@ export function listMovements(filters: {
   amountTo?: number
 } = {}) {
   const where: string[] = []
-  const params: Record<string, string> = {}
+  const params: Record<string, string | number> = {}
   if (filters.status && filters.status !== 'TODOS') {
     where.push('status = @status')
     params.status = filters.status
@@ -260,8 +272,8 @@ export function listMovements(filters: {
     params.orderNo = `%${filters.orderNo}%`
   }
   if (filters.receipt) {
-    where.push('receipt LIKE @receipt')
-    params.receipt = `%${filters.receipt}%`
+    where.push(`UPPER(REPLACE(receipt || order_no, ' ', '')) LIKE @receipt`)
+    params.receipt = `%${filters.receipt.replace(/\s+/g, '').toUpperCase()}%`
   }
   if (filters.ref1) {
     where.push('ref1 LIKE @ref1')
@@ -273,13 +285,14 @@ export function listMovements(filters: {
   }
   if (filters.sign === 'DEBITO') where.push('debit_cents > 0')
   if (filters.sign === 'CREDITO') where.push('credit_cents > 0')
+  const amountExpression = `CASE WHEN ABS(debit_cents) >= ABS(credit_cents) THEN ABS(debit_cents) ELSE ABS(credit_cents) END`
   if (filters.amountFrom !== undefined) {
-    where.push('MAX(debit_cents, credit_cents) >= @amountFrom')
-    params.amountFrom = String(filters.amountFrom)
+    where.push(`${amountExpression} >= @amountFrom`)
+    params.amountFrom = filters.amountFrom
   }
   if (filters.amountTo !== undefined) {
-    where.push('MAX(debit_cents, credit_cents) <= @amountTo')
-    params.amountTo = String(filters.amountTo)
+    where.push(`${amountExpression} <= @amountTo`)
+    params.amountTo = filters.amountTo
   }
   const sql = `SELECT * FROM movements ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY date, process_date, id`
   return (db.prepare(sql).all(params) as Record<string, unknown>[]).map(mapMovement)
@@ -334,12 +347,13 @@ export function confirmReconciliation(
           debit_cents, credit_cents, notes, dealer, pair_id, reconciliation_id,
           is_adjustment, fingerprint
         ) VALUES (
-          'LIBRO', 'CONCILIADO', @date, @date, @receipt, @sector, @orderNo, @ref1, @ref2,
+          'LIBRO', 'CONCILIADO', @date, @processDate, @receipt, @sector, @orderNo, @ref1, @ref2,
           @debitCents, @creditCents, @notes, @dealer, @reconciliationId, @reconciliationId,
           1, @fingerprint
         )
       `).run({
         date,
+        processDate: loadDate(),
         receipt: adjustment?.receipt || 'AJDIF',
         sector: adjustment?.sector || '*',
         orderNo: adjustment?.orderNo || '',
@@ -422,13 +436,35 @@ export function unreconcile(id: number, reason: string) {
 
 export function statusSummary() {
   const counts = db.prepare('SELECT origin, status, COUNT(*) count FROM movements GROUP BY origin, status').all()
-  const totals = db.prepare(`
-    SELECT
-      SUM(CASE WHEN debit_cents > 0 THEN debit_cents ELSE 0 END) debits,
-      SUM(CASE WHEN credit_cents > 0 THEN credit_cents ELSE 0 END) credits
-    FROM movements WHERE status != 'ELIMINADO'
-  `).get()
-  return { db: dbPath.split('/').pop(), counts, totals }
+  const sides = db.prepare(`
+    SELECT origin,
+      COALESCE(SUM(debit_cents), 0) debits,
+      COALESCE(SUM(credit_cents), 0) credits,
+      COALESCE(SUM(CASE WHEN debit_cents != 0 THEN 1 ELSE 0 END), 0) debit_count,
+      COALESCE(SUM(CASE WHEN credit_cents != 0 THEN 1 ELSE 0 END), 0) credit_count
+    FROM movements
+    WHERE status != 'ELIMINADO'
+    GROUP BY origin
+  `).all() as Array<{ origin: string; debits: number; credits: number; debit_count: number; credit_count: number }>
+  const side = (origin: string) => sides.find((row) => row.origin === origin) ?? { debits: 0, credits: 0, debit_count: 0, credit_count: 0 }
+  const bank = side('BANCO')
+  const book = side('LIBRO')
+  return {
+    db: dbPath.split('/').pop(),
+    counts,
+    statement: {
+      bankDebits: Number(bank.debits),
+      bankDebitCount: Number(bank.debit_count),
+      bankCredits: Number(bank.credits),
+      bankCreditCount: Number(bank.credit_count),
+      bookDebits: Number(book.debits),
+      bookDebitCount: Number(book.debit_count),
+      bookCredits: Number(book.credits),
+      bookCreditCount: Number(book.credit_count),
+      bankBalance: Number(bank.debits) - Number(bank.credits),
+      bookBalance: Number(book.debits) - Number(book.credits),
+    },
+  }
 }
 
 export function auditRows() {
@@ -453,3 +489,14 @@ export function seedDemo() {
 }
 
 seedDemo()
+
+db.exec(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`)
+const processDateBackfill = db.prepare(`SELECT value FROM schema_meta WHERE key = 'process_date_backfill'`).get()
+if (!processDateBackfill) {
+  const copied = db.prepare(`SELECT id, created_at FROM movements WHERE process_date = date`).all() as Array<{ id: number; created_at: string }>
+  const updateProcessDate = db.prepare(`UPDATE movements SET process_date = ? WHERE id = ?`)
+  db.transaction(() => {
+    copied.forEach((row) => updateProcessDate.run(loadDate(row.created_at), row.id))
+    db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('process_date_backfill', '1')`).run()
+  })()
+}

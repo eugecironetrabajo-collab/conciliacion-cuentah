@@ -25,7 +25,7 @@ const ok = (data: unknown) => ({ ok: true, data })
 const queryString = (value: unknown) => typeof value === 'string' ? value : undefined
 const queryCents = (value: unknown) => {
   if (typeof value !== 'string' || value.trim() === '') return undefined
-  const number = Number(value.replace(/\./g, '').replace(',', '.'))
+  const number = Number(value.trim().replace(/[$\s]/g, '').replace(/\./g, '').replace(',', '.'))
   return Number.isFinite(number) ? Math.round(number * 100) : undefined
 }
 

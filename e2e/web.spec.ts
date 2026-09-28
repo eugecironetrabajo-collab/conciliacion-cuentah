@@ -97,3 +97,43 @@ test('imports several bank files once and restores a logically deleted movement'
   await page.locator('#restore-selected').click()
   await expect(page.locator('#toast')).toContainText('1 movimiento(s) restaurados')
 })
+
+test('filters a partial receipt and an amount, and shows separate balances', async ({ page }) => {
+  const documentNo = `000104${String(Date.now()).slice(-6)}`
+  const cents = 80_000_000 + (Date.now() % 100_000)
+  const amount = (cents / 100).toFixed(2).replace('.', ',').padStart(15, '0')
+  const chars = Array.from({ length: 207 }, () => ' ')
+  const put = (start: number, value: string) => [...value].forEach((character, index) => { chars[start + index] = character })
+  put(0, '41110100')
+  put(33, documentNo)
+  put(47, 'AB')
+  put(54, 'SALDO FILTRO')
+  put(120, amount)
+  put(136, '00000000000,00')
+  put(193, '251128')
+  await page.goto('/#/importar')
+  await page.locator('#dz-txt input').setInputFiles({
+    name: 'filtro.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(chars.join('')),
+  })
+  await expect(page.locator('[data-result="banco"]')).toContainText('1 partidas nuevas')
+
+  await page.goto('/#/movimientos')
+  await page.locator('#f-comprobante').fill(documentNo.slice(-4))
+  const shown = new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(cents / 100)
+  await page.locator('#f-importe-desde').fill(shown)
+  await page.locator('#f-importe-hasta').fill(shown)
+  await page.locator('#f-aplicar').click()
+  await expect(page.locator('#movement-body tr')).toHaveCount(1)
+  await expect(page.locator('#movement-body tr')).toContainText(`AB ${documentNo}`)
+  const today = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Argentina/Buenos_Aires' }).format(new Date())
+  await expect(page.locator('#movement-body tr')).toContainText(today)
+
+  await page.goto('/#/resumen')
+  await expect(page.getByRole('cell', { name: 'Saldo banco' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: '(+) Débitos libros' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: '(−) Créditos bancos' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: 'Saldo libros' })).toBeVisible()
+  await expect(page.getByText('Total débitos')).toHaveCount(0)
+})
