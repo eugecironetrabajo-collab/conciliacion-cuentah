@@ -12,10 +12,99 @@ test('moves individual lines between quadrants with double click', async ({ page
   await expect(page.getByRole('button', { name: /Confirmar conciliación/ })).toBeDisabled()
 })
 
+test('moves multiple pending lines with selection and Enter', async ({ page }) => {
+  await page.goto('/#/conciliar')
+  const rows = page.locator('#pending-grid [data-sel]')
+  await rows.nth(0).click()
+  await rows.nth(1).click()
+  await expect(page.locator('#selection-bar')).toContainText('2 partidas seleccionadas')
+  await page.keyboard.press('Enter')
+  await expect(page.locator('#staged-count')).toHaveText('2 partidas')
+  await page.locator('#staged-grid [data-staged-line]').first().click()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('#staged-count')).toHaveText('1 partida')
+})
+
 test('import screen states that importing does not reconcile', async ({ page }) => {
   await page.goto('/#/importar')
   await expect(page.getByText('Importación y conciliación son pasos separados')).toBeVisible()
   await expect(page.getByText(/nunca se ejecuta automáticamente/)).toBeVisible()
+})
+
+test('assigns responsable from movimientos grid', async ({ page }) => {
+  const pendingResponse = await page.request.get('/api/movimientos?estado=PENDIENTE')
+  const pendingPayload = await pendingResponse.json()
+  const pending = pendingPayload.data.find((row: { status: string; isAdjustment?: boolean }) => row.status === 'PENDIENTE' && !row.isAdjustment)
+  expect(pending).toBeTruthy()
+
+  await page.goto('/#/movimientos')
+  const select = page.locator(`.assignee-select[data-assignee="${pending.id}"]`)
+  await expect(select).toBeVisible()
+  await select.selectOption('Pend Bru')
+
+  const updatedResponse = await page.request.get('/api/movimientos?estado=PENDIENTE')
+  const updatedPayload = await updatedResponse.json()
+  const updated = updatedPayload.data.find((row: { id: number }) => row.id === pending.id)
+  expect(updated?.assignee).toBe('Pend Bru')
+})
+
+test('sorts movimientos grid by date on header double click', async ({ page }) => {
+  await page.goto('/#/movimientos')
+  const dateHeader = page.locator('.standard-table button[data-column="date"]')
+  await expect(dateHeader).toBeVisible()
+  const readDates = () => page.locator('#movement-body tr').evaluateAll((rows) =>
+    rows.map((row) => (row as HTMLElement).dataset.date ?? ''))
+  expect((await readDates()).length).toBeGreaterThan(1)
+  await dateHeader.dblclick()
+  await expect(dateHeader).toHaveAttribute('aria-sort', 'ascending')
+  assertOrdered(await readDates(), 'asc')
+})
+
+test('sorts movimientos grid by id on header double click', async ({ page }) => {
+  await page.goto('/#/movimientos')
+  const idHeader = page.locator('.standard-table button[data-column="id"]')
+  await expect(idHeader).toBeVisible()
+  const readIds = () => page.locator('#movement-body tr').evaluateAll((rows) =>
+    rows.map((row) => Number((row as HTMLElement).dataset.id ?? 0)))
+  const before = await readIds()
+  expect(before.length).toBeGreaterThan(1)
+  await idHeader.dblclick()
+  await expect(idHeader).toHaveAttribute('aria-sort', 'ascending')
+  assertOrdered(await readIds(), 'asc')
+  await idHeader.dblclick()
+  await expect(idHeader).toHaveAttribute('aria-sort', 'descending')
+  assertOrdered(await readIds(), 'desc')
+  expect(await readIds()).not.toEqual(before)
+})
+
+test('filters summary balances by terminal code', async ({ page }) => {
+  const amount = (75_000_000 + (Date.now() % 100_000)).toString()
+  const amountCell = amount.padStart(15, '0').replace(/(\d{2})$/, ',$1')
+  const documentNo = String(Date.now()).padStart(12, '0').slice(-12)
+  const chars = Array.from({ length: 207 }, () => ' ')
+  const put = (start: number, value: string) => [...value].forEach((character, index) => { chars[start + index] = character })
+  put(0, '41110100')
+  put(33, documentNo)
+  put(47, 'DA')
+  put(54, 'SALDO TERMINAL 3550')
+  put(120, amountCell)
+  put(136, '00000000000,00')
+  put(193, '251128')
+  await page.goto('/#/importar')
+  await page.locator('#dz-txt input').setInputFiles({
+    name: '3550-saldo.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(`PEUGEOT${' '.repeat(164)}Tot Cliente ARP3550\r\n${chars.join('')}\r\n${' '.repeat(52)}** Tot. Cuenta 41110100`),
+  })
+  await expect(page.locator('[data-result="banco"]')).toContainText('1 partidas nuevas')
+
+  await page.goto('/#/resumen')
+  const balanceCell = page.locator('#balance-sheet-body tr.total').first().locator('td.number').last()
+  const allBalance = await balanceCell.innerText()
+  await page.locator('#summary-dealer').selectOption('3550')
+  await expect(page.locator('#balance-sheet-caption')).toContainText('3550')
+  const filteredBalance = await balanceCell.innerText()
+  expect(filteredBalance).not.toBe(allBalance)
 })
 
 test('keeps documented movement filters', async ({ page }) => {
@@ -25,6 +114,18 @@ test('keeps documented movement filters', async ({ page }) => {
   await expect(page.locator('input[name="f-estado"]')).toHaveCount(3)
   await expect(page.locator('input[name="f-origen"]')).toHaveCount(3)
   await expect(page.locator('#f-aplicar')).toBeVisible()
+})
+
+test('applies bank and date filters in conciliation', async ({ page }) => {
+  await page.goto('/#/conciliar')
+  await page.locator('#r-dealer').selectOption('1337')
+  await page.locator('#r-from').fill('2026-01-01')
+  await page.locator('#r-to').fill('2026-12-31')
+  await page.locator('#r-aplicar').click()
+  await expect(page.locator('#pending-grid')).toBeVisible()
+  const dates = await page.locator('#pending-grid [data-date]').evaluateAll((items) => items.map((item) => (item as HTMLElement).dataset.date))
+  for (const date of dates) expect(date! >= '2026-01-01').toBeTruthy()
+  for (const date of dates) expect(date! <= '2026-12-31').toBeTruthy()
 })
 
 test('opens a numbered group and reverses all original movements', async ({ page }) => {
@@ -49,9 +150,11 @@ test('opens a numbered group and reverses all original movements', async ({ page
   await page.locator(`tr[data-reconciliation="${reconciliationId}"]`).first().dblclick()
   await expect(page.getByRole('heading', { name: `Conciliación N.º ${reconciliationId}` })).toBeVisible()
   await page.getByRole('button', { name: 'Preparar reversión' }).click()
-  await page.locator('[data-reverse-group]').first().dblclick()
+  const reversalReference = page.locator('button[data-grid="reversal-active"][data-sort="reference"]')
+  await reversalReference.dblclick()
+  await expect(reversalReference).toHaveAttribute('aria-sort', 'ascending')
   await page.locator('#reversal-reason').fill('Reversión controlada por prueba E2E')
-  await page.getByRole('button', { name: 'Guardar reversión' }).click()
+  await page.getByRole('button', { name: 'Revertir conciliación completa' }).click()
   await expect(page.locator('#toast')).toContainText(`Conciliación ${reconciliationId} revertida`)
 
   const detailResponse = await page.request.get(`/api/reconciliaciones/${reconciliationId}`)
@@ -166,29 +269,29 @@ test('sorts conciliation grids and filters pending rows by concept', async ({ pa
   const pending = page.locator('#pending-grid [data-sel]')
   await expect(pending.first()).toBeVisible()
 
-  const read = async (name: 'date' | 'amount' | 'notes') =>
+  const read = async (name: 'date' | 'bankDebit' | 'notes') =>
     pending.evaluateAll((rows, key) => rows.map((row) => (row as HTMLElement).dataset[key] ?? ''), name)
 
   const dateHeader = page.locator('.top-ledger button[data-column="date"]')
-  await dateHeader.click()
+  await dateHeader.dblclick()
   await expect(dateHeader).toHaveAttribute('aria-sort', 'ascending')
   assertOrdered(await read('date'), 'asc')
-  await dateHeader.click()
+  await dateHeader.dblclick()
   await expect(dateHeader).toHaveAttribute('aria-sort', 'descending')
   assertOrdered(await read('date'), 'desc')
 
   const amountHeader = page.locator('.top-ledger button[data-column="bank-debit"]')
-  await amountHeader.click()
+  await amountHeader.dblclick()
   await expect(amountHeader).toHaveAttribute('aria-sort', 'descending')
-  assertOrdered((await read('amount')).map(Number), 'desc')
-  await amountHeader.click()
-  assertOrdered((await read('amount')).map(Number), 'asc')
+  assertOrdered((await read('bankDebit')).map(Number), 'desc')
+  await amountHeader.dblclick()
+  assertOrdered((await read('bankDebit')).map(Number), 'asc')
 
   const notesHeader = page.locator('.top-ledger button[data-column="notes"]')
-  await notesHeader.click()
+  await notesHeader.dblclick()
   await expect(notesHeader).toHaveAttribute('aria-sort', 'ascending')
   assertOrdered(await read('notes'), 'asc', (left, right) => left.localeCompare(right, 'es', { sensitivity: 'base' }))
-  await notesHeader.click()
+  await notesHeader.dblclick()
   await expect(notesHeader).toHaveAttribute('aria-sort', 'descending')
   assertOrdered(await read('notes'), 'desc', (left, right) => left.localeCompare(String(right), 'es', { sensitivity: 'base' }))
 

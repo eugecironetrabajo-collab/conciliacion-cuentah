@@ -15,6 +15,7 @@ export interface Movement {
   debitCents: number
   creditCents: number
   notes: string
+  assignee: string
   dealer: string
   pairId: number | null
   reconciliationId: number | null
@@ -22,8 +23,7 @@ export interface Movement {
 }
 
 export interface Candidate {
-  bankId: number
-  bookId: number
+  movementIds: [number, number]
   score: number
   differenceCents: number
   reason: string

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import * as XLSX from 'xlsx'
-import { parseBankFile, parseBookFile } from '../src/importers.js'
+import { bankBusinessKey, isTerminalSummaryWorkbook, parseBankFile, parseBookFile } from '../src/importers.js'
 
 const put = (chars: string[], start: number, value: string) => {
   ;[...value].forEach((character, index) => { chars[start + index] = character })
@@ -22,6 +22,13 @@ const fixedLine = (documentNo: string, description: string) => {
   put(chars, 193, '251128')
   return chars.join('')
 }
+
+const bankText = (clientLine: string, documentNo: string, description: string) => [
+  'CITROEN'.padEnd(174, ' '),
+  clientLine,
+  fixedLine(documentNo, description),
+  '                                                    ** Tot. Cuenta 41110100',
+].join('\r\n')
 
 test('fixed-width bank files keep one copy and decode Windows-1252', () => {
   const text = [
@@ -46,6 +53,83 @@ test('fixed-width bank files keep one copy and decode Windows-1252', () => {
   assert.equal(first.orderNo, '001600096137')
   assert.equal(first.dealer, '1337')
   assert.match(first.notes ?? '', /NIÑO/)
+})
+
+test('fixed-width bank files read ARC terminal codes', () => {
+  const parsed3831 = parseBankFile(Buffer.from(bankText('Tot Client ARC3831', '001600096137', 'CISA - SAN NICOLAS'), 'latin1'), '3831.txt')
+  const parsed3847 = parseBankFile(Buffer.from(bankText('Tot Client ARC3847', '001600096138', 'CISA - TRELEW'), 'latin1'), '3847.txt')
+  assert.equal(parsed3831.rows[0]?.dealer, '3831')
+  assert.equal(parsed3847.rows[0]?.dealer, '3847')
+})
+
+const terminalWorkbook = (rows: unknown[][]) => {
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['Cliente', 'Nº documento', 'Clase de documento', 'Fecha de documento', 'Indicador CME', 'Importe en moneda local', 'Moneda local', 'Texto'],
+    ...rows,
+  ])
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Sheet1')
+  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' }) as Buffer
+}
+
+test('terminal summary workbooks map signed amounts and terminal codes', () => {
+  const buffer = terminalWorkbook([
+    ['ARP1337', '1600050529', 'DA', 46237, 'H', 1596845.45, 'ARS', 'CISA - TRANSFERENCIA SALDOS CE (01)'],
+    ['ARC3831', '1600052608', 'DB', 46244, 'H', -20000000, 'ARS', 'TRF FONDOS'],
+  ])
+  assert.equal(isTerminalSummaryWorkbook(buffer), true)
+  const parsed = parseBankFile(buffer, '1337.xlsx')
+  assert.equal(parsed.format, 'terminal-summary')
+  assert.equal(parsed.rows.length, 2)
+  assert.equal(parsed.errors.length, 0)
+  const [debit, credit] = parsed.rows
+  if (!credit || !debit) throw new Error('No se importaron las partidas del resumen terminal')
+  assert.equal(debit.dealer, '1337')
+  assert.equal(debit.orderNo, '1600050529')
+  assert.equal(debit.receipt, 'DA')
+  assert.equal(debit.date, '2026-08-03')
+  assert.equal(debit.debitCents, 159_684_545)
+  assert.equal(debit.creditCents, 0)
+  assert.equal(credit.dealer, '3831')
+  assert.equal(credit.creditCents, 2_000_000_000)
+  assert.equal(credit.debitCents, 0)
+})
+
+test('bank business key matches txt and terminal document numbers', () => {
+  const txtKey = bankBusinessKey({
+    dealer: '3550',
+    orderNo: '001600052537',
+    receipt: 'DA',
+    debitCents: 1_355_142_338,
+    creditCents: 0,
+  })
+  const terminalKey = bankBusinessKey({
+    dealer: '3550',
+    orderNo: '1600052537',
+    receipt: 'DA',
+    debitCents: 1_355_142_338,
+    creditCents: 0,
+  })
+  assert.equal(txtKey, terminalKey)
+})
+
+test('reimporting bank files updates dealer on duplicates', async () => {
+  process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'cuenta-h-')), 'conciliacion.db')
+  const db = await import('../src/db.js')
+  const row = {
+    origin: 'BANCO' as const,
+    date: '2025-11-28',
+    debitCents: 100,
+    notes: 'Terminal incorrecta',
+    dealer: '6',
+    fingerprint: 'banco-terminal-3831',
+  }
+  const first = db.importBatches([{ name: 'a.txt', rows: [row] }])
+  assert.equal(first[0]?.inserted, 1)
+  const second = db.importBatches([{ name: 'a.txt', rows: [{ ...row, dealer: '3831' }] }])
+  assert.equal(second[0]?.inserted, 0)
+  assert.equal(second[0]?.updatedDealers, 1)
+  assert.equal(db.listMovements({ dealer: '3831' }).length, 1)
 })
 
 test('Quiter workbook skips structural rows and preserves signed amounts', () => {

@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { AdjustmentInput, ImportRow, Movement, Origin, ReconciliationRecord } from './types.js'
 import { balanceSummary } from './reconcile.js'
+import { bankBusinessKey, type BankMatchFields } from './importers.js'
 import { bookFingerprint, bookTerminal, normalizeBookAmounts } from './terminals.js'
 
 const dbPath = resolve(process.env.DB_PATH ?? 'data/conciliacion.db')
@@ -81,6 +82,9 @@ if (!movementColumns.some((column) => column.name === 'reconciliation_id')) {
 if (!movementColumns.some((column) => column.name === 'is_adjustment')) {
   db.exec('ALTER TABLE movements ADD COLUMN is_adjustment INTEGER NOT NULL DEFAULT 0')
 }
+if (!movementColumns.some((column) => column.name === 'assignee')) {
+  db.exec("ALTER TABLE movements ADD COLUMN assignee TEXT NOT NULL DEFAULT ''")
+}
 
 const legacyPairs = db.prepare(`
   SELECT p.* FROM pairs p
@@ -115,6 +119,7 @@ const mapMovement = (row: Record<string, unknown>): Movement => ({
   debitCents: Number(row.debit_cents),
   creditCents: Number(row.credit_cents),
   notes: String(row.notes),
+  assignee: String(row.assignee ?? ''),
   dealer: String(row.dealer),
   pairId: row.pair_id === null ? null : Number(row.pair_id),
   reconciliationId: row.reconciliation_id === null ? null : Number(row.reconciliation_id),
@@ -162,30 +167,146 @@ const movementValues = (row: ImportRow) => ({
 })
 
 export function insertMovements(rows: ImportRow[]) {
-  return importBatches([{ name: 'archivo', rows }])[0]
+  let inserted = 0
+  for (const row of rows) {
+    const result = insertStatement.run(movementValues(row))
+    if (result.changes) inserted += 1
+  }
+  return { inserted, duplicates: 0, updatedDealers: 0, skippedExisting: 0, cleanedDuplicates: 0, total: rows.length }
+}
+
+const updateBankDealer = db.prepare(`
+  UPDATE movements SET dealer = @dealer
+  WHERE fingerprint = @fingerprint AND origin = 'BANCO' AND dealer != @dealer
+`)
+
+const loadBankBusinessKeys = () => new Set(
+  (db.prepare(`
+    SELECT dealer, order_no AS orderNo, receipt, debit_cents AS debitCents, credit_cents AS creditCents
+    FROM movements
+    WHERE origin = 'BANCO' AND status != 'ELIMINADO'
+  `).all() as Array<BankMatchFields>).map((row) => bankBusinessKey(row)),
+)
+
+export function cleanupCrossSourceBankDuplicates() {
+  const rows = db.prepare(`
+    SELECT id, status, dealer, order_no AS orderNo, receipt, debit_cents AS debitCents, credit_cents AS creditCents
+    FROM movements
+    WHERE origin = 'BANCO'
+  `).all() as Array<BankMatchFields & { id: number; status: string }>
+
+  const groups = new Map<string, Array<BankMatchFields & { id: number; status: string }>>()
+  for (const row of rows) {
+    const key = bankBusinessKey(row)
+    const list = groups.get(key) ?? []
+    list.push(row)
+    groups.set(key, list)
+  }
+
+  const toDelete: number[] = []
+  for (const group of groups.values()) {
+    const pending = group.filter((row) => row.status === 'PENDIENTE')
+    if (pending.length < 2) continue
+    const sorted = [...pending].sort((left, right) => left.id - right.id)
+    toDelete.push(...sorted.slice(1).map((row) => row.id))
+  }
+
+  if (toDelete.length) deleteMovements(toDelete, 'Duplicado entre TXT y resumen terminal')
+  return { cleaned: toDelete.length }
 }
 
 export function importBatches(files: Array<{ name: string; rows: ImportRow[] }>) {
-  return db.transaction(() => {
+  const hasBank = files.some((file) => file.rows.some((row) => row.origin === 'BANCO'))
+  const { cleaned } = hasBank ? cleanupCrossSourceBankDuplicates() : { cleaned: 0 }
+  const results = db.transaction(() => {
+    const existingBankKeys = hasBank ? loadBankBusinessKeys() : null
     const seen = new Set(
       (db.prepare('SELECT fingerprint FROM movements').all() as Array<{ fingerprint: string }>).map((row) => row.fingerprint),
     )
     return files.map((file) => {
       let inserted = 0
       let duplicates = 0
+      let updatedDealers = 0
+      let skippedExisting = 0
       for (const row of file.rows) {
         const values = movementValues(row)
         if (seen.has(values.fingerprint)) {
+          if (values.origin === 'BANCO') {
+            const result = updateBankDealer.run(values)
+            if (result.changes) updatedDealers += 1
+          }
+          duplicates += 1
+          continue
+        }
+        if (values.origin === 'BANCO' && existingBankKeys) {
+          const businessKey = bankBusinessKey(values)
+          if (existingBankKeys.has(businessKey)) {
+            skippedExisting += 1
+            continue
+          }
+        }
+        insertStatement.run(values)
+        seen.add(values.fingerprint)
+        if (values.origin === 'BANCO' && existingBankKeys) existingBankKeys.add(bankBusinessKey(values))
+        inserted += 1
+      }
+      return { name: file.name, inserted, duplicates, updatedDealers, skippedExisting, cleanedDuplicates: 0, total: file.rows.length }
+    })
+  })()
+  if (cleaned && results.length) results[0].cleanedDuplicates = cleaned
+  return results
+}
+
+export function importTerminalSummaryBatches(files: Array<{ name: string; rows: ImportRow[] }>) {
+  const { cleaned } = cleanupCrossSourceBankDuplicates()
+  const results = db.transaction(() => {
+    const existingKeys = new Set(
+      (db.prepare(`
+        SELECT dealer, order_no AS orderNo, receipt, debit_cents AS debitCents, credit_cents AS creditCents
+        FROM movements
+        WHERE origin = 'BANCO' AND status != 'ELIMINADO'
+      `).all() as Array<BankMatchFields>).map((row) => bankBusinessKey(row)),
+    )
+    const seenFingerprints = new Set(
+      (db.prepare('SELECT fingerprint FROM movements').all() as Array<{ fingerprint: string }>).map((row) => row.fingerprint),
+    )
+    return files.map((file) => {
+      let inserted = 0
+      let duplicates = 0
+      let skippedExisting = 0
+      for (const row of file.rows) {
+        const values = movementValues(row)
+        const businessKey = bankBusinessKey(values)
+        if (existingKeys.has(businessKey)) {
+          skippedExisting += 1
+          continue
+        }
+        if (seenFingerprints.has(values.fingerprint)) {
           duplicates += 1
           continue
         }
         insertStatement.run(values)
-        seen.add(values.fingerprint)
+        seenFingerprints.add(values.fingerprint)
+        existingKeys.add(businessKey)
         inserted += 1
       }
-      return { name: file.name, inserted, duplicates, total: file.rows.length }
+      return { name: file.name, inserted, duplicates, updatedDealers: 0, skippedExisting, cleanedDuplicates: 0, total: file.rows.length }
     })
   })()
+  if (!results.length) return results
+  results[0].cleanedDuplicates = cleaned
+  return results
+}
+
+export function updateMovementAssignee(id: number, assignee: string) {
+  const row = getMovements([id])[0]
+  if (!row) throw new Error('La partida no existe')
+  if (row.status !== 'PENDIENTE') throw new Error('Solo se puede asignar responsable a partidas pendientes')
+  const value = assignee.trim().slice(0, 80)
+  db.prepare('UPDATE movements SET assignee = ? WHERE id = ?').run(value, id)
+  db.prepare("INSERT INTO audit (action, detail) VALUES ('ASIGNAR_RESPONSABLE', ?)")
+    .run(`Partida ${id}: ${value || 'sin responsable'}`)
+  return getMovements([id])[0]
 }
 
 export function deleteMovements(ids: number[], reason: string) {
@@ -338,6 +459,11 @@ export function getMovements(ids: number[]) {
   return (db.prepare(`SELECT * FROM movements WHERE id IN (${placeholders})`).all(...ids) as Record<string, unknown>[]).map(mapMovement)
 }
 
+const isAdjustmentClosure = (rows: Movement[]) =>
+  rows.length === 2
+  && rows.every((row) => row.origin === 'LIBRO')
+  && rows.filter((row) => row.isAdjustment).length === 1
+
 export function confirmReconciliation(
   movementIds: number[],
   adjustment: AdjustmentInput | undefined,
@@ -349,9 +475,44 @@ export function confirmReconciliation(
     if (rows.length !== uniqueIds.length || rows.some((row) => row.status !== 'PENDIENTE')) {
       throw new Error('Una de las partidas ya no está disponible')
     }
-    if (!rows.some((row) => row.origin === 'BANCO') || !rows.some((row) => row.origin === 'LIBRO')) {
-      throw new Error('La conciliación debe incluir partidas bancarias y contables')
+    if (uniqueIds.length < 2) {
+      throw new Error('Seleccione al menos dos partidas')
     }
+
+    if (isAdjustmentClosure(rows)) {
+      const adjustmentRow = rows.find((row) => row.isAdjustment)
+      const bookRow = rows.find((row) => !row.isAdjustment)
+      if (!adjustmentRow || !bookRow) throw new Error('La conciliación de ajuste no es válida')
+      const { differenceCents: difference } = balanceSummary(rows)
+      if (difference !== 0) throw new Error('El ajuste y la partida contable deben tener importes opuestos')
+      const parentReconciliationId = adjustmentRow.reconciliationId
+      if (!parentReconciliationId) throw new Error('El ajuste no está vinculado a una conciliación previa')
+
+      const result = db.prepare(`
+        INSERT INTO reconciliations (mode, adjustment_cents, adjustment_reason)
+        VALUES (?, 0, '')
+      `).run(mode)
+      const reconciliationId = Number(result.lastInsertRowid)
+      const itemStatement = db.prepare(`
+        INSERT INTO reconciliation_items (reconciliation_id, movement_id, is_adjustment)
+        VALUES (?, ?, ?)
+      `)
+      itemStatement.run(reconciliationId, adjustmentRow.id, 1)
+      itemStatement.run(reconciliationId, bookRow.id, 0)
+      db.prepare(`
+        UPDATE movements
+        SET status = 'CONCILIADO', reconciliation_id = ?, pair_id = ?
+        WHERE id IN (?, ?)
+      `).run(reconciliationId, parentReconciliationId, adjustmentRow.id, bookRow.id)
+      db.prepare(`
+        DELETE FROM reconciliation_items
+        WHERE reconciliation_id = ? AND movement_id = ? AND is_adjustment = 1
+      `).run(parentReconciliationId, adjustmentRow.id)
+      db.prepare("INSERT INTO audit (action, detail) VALUES ('CONCILIAR_AJUSTE', ?)")
+        .run(`Conciliación ${reconciliationId}: ajuste ${adjustmentRow.id} cerrado con partida ${bookRow.id} desde ${parentReconciliationId}`)
+      return { reconciliationId, movementCount: rows.length, adjustmentId: adjustmentRow.id, differenceCents: 0 }
+    }
+
     const { differenceCents: difference } = balanceSummary(rows)
     if (difference !== 0 && !adjustment?.reason.trim()) {
       throw new Error('Explique el motivo de la diferencia contable')
@@ -381,8 +542,8 @@ export function confirmReconciliation(
           debit_cents, credit_cents, notes, dealer, pair_id, reconciliation_id,
           is_adjustment, fingerprint
         ) VALUES (
-          'LIBRO', 'CONCILIADO', @date, @processDate, @receipt, @sector, @orderNo, @ref1, @ref2,
-          @debitCents, @creditCents, @notes, @dealer, @reconciliationId, @reconciliationId,
+          'LIBRO', 'PENDIENTE', @date, @processDate, @receipt, @sector, @orderNo, @ref1, @ref2,
+          @debitCents, @creditCents, @notes, @dealer, NULL, @reconciliationId,
           1, @fingerprint
         )
       `).run({
@@ -396,7 +557,7 @@ export function confirmReconciliation(
         debitCents: difference < 0 ? Math.abs(difference) : 0,
         creditCents: difference > 0 ? difference : 0,
         notes: adjustment!.reason.trim(),
-        dealer: rows[0].dealer,
+        dealer: rows.find((row) => row.origin === 'LIBRO')?.dealer ?? rows[0].dealer,
         reconciliationId,
         fingerprint: `AJUSTE|${reconciliationId}|${Date.now()}`,
       })
@@ -436,6 +597,36 @@ export function reverseReconciliation(id: number, reason: string) {
     if (!reason.trim()) throw new Error('Indique el motivo de la reversión')
     const reconciliation = getReconciliation(id)
     if (!reconciliation || reconciliation.status !== 'ACTIVA') throw new Error('La conciliación no está activa')
+
+    if (isAdjustmentClosure(reconciliation.movements)) {
+      const adjustment = reconciliation.movements.find((row) => row.isAdjustment)
+      const bookRow = reconciliation.movements.find((row) => !row.isAdjustment)
+      if (!adjustment || !bookRow) throw new Error('La conciliación de ajuste no es válida')
+      const parentReconciliationId = adjustment.pairId
+      if (!parentReconciliationId) throw new Error('No se encontró la conciliación origen del ajuste')
+
+      db.prepare(`
+        UPDATE movements SET status = 'PENDIENTE', reconciliation_id = ?, pair_id = NULL
+        WHERE id = ?
+      `).run(parentReconciliationId, adjustment.id)
+      db.prepare(`
+        UPDATE movements SET status = 'PENDIENTE', reconciliation_id = NULL, pair_id = NULL
+        WHERE id = ?
+      `).run(bookRow.id)
+      db.prepare(`
+        INSERT INTO reconciliation_items (reconciliation_id, movement_id, is_adjustment)
+        VALUES (?, ?, 1)
+      `).run(parentReconciliationId, adjustment.id)
+      db.prepare(`
+        UPDATE reconciliations
+        SET status = 'REVERTIDA', reversed_at = CURRENT_TIMESTAMP, reversal_reason = ?
+        WHERE id = ?
+      `).run(reason.trim(), id)
+      db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)")
+        .run(`Conciliación ${id}: ajuste ${adjustment.id} reabierto en ${parentReconciliationId}. ${reason.trim()}`)
+      return { reconciliationId: id, restored: 2 }
+    }
+
     db.prepare(`
       UPDATE movements SET status = 'PENDIENTE', pair_id = NULL, reconciliation_id = NULL
       WHERE id IN (
@@ -461,6 +652,40 @@ export function reverseReconciliation(id: number, reason: string) {
   })()
 }
 
+export function reverseReconciliationPartial(id: number, movementIds: number[], reason: string) {
+  return db.transaction(() => {
+    if (!reason.trim()) throw new Error('Indique el motivo de la reversión')
+    const reconciliation = getReconciliation(id)
+    if (!reconciliation || reconciliation.status !== 'ACTIVA') throw new Error('La conciliación no está activa')
+    const originalRows = reconciliation.movements.filter((row) => !row.isAdjustment)
+    const selectedIds = [...new Set(movementIds)]
+    if (!selectedIds.length) throw new Error('Seleccione al menos una partida para revertir')
+    if (selectedIds.some((movementId) => !originalRows.some((row) => row.id === movementId))) {
+      throw new Error('Solo se pueden revertir partidas originales de la conciliación')
+    }
+    if (selectedIds.length === originalRows.length) return reverseReconciliation(id, reason)
+
+    const remainingRows = reconciliation.movements.filter((row) => !selectedIds.includes(row.id))
+    const { differenceCents } = balanceSummary(remainingRows)
+    if (differenceCents !== 0) {
+      throw new Error('La reversión parcial dejaría la conciliación desbalanceada; revierta el grupo completo')
+    }
+
+    const placeholders = selectedIds.map(() => '?').join(',')
+    db.prepare(`
+      UPDATE movements SET status = 'PENDIENTE', pair_id = NULL, reconciliation_id = NULL
+      WHERE id IN (${placeholders})
+    `).run(...selectedIds)
+    db.prepare(`
+      DELETE FROM reconciliation_items
+      WHERE reconciliation_id = ? AND movement_id IN (${placeholders}) AND is_adjustment = 0
+    `).run(id, ...selectedIds)
+    db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)")
+      .run(`Conciliación ${id}: reversión parcial de ${selectedIds.length} partidas. ${reason.trim()}`)
+    return { reconciliationId: id, restored: selectedIds.length, partial: true }
+  })()
+}
+
 export function unreconcile(id: number, reason: string) {
   const movement = getMovements([id])[0]
   const reconciliationId = movement?.reconciliationId ?? movement?.pairId
@@ -468,8 +693,9 @@ export function unreconcile(id: number, reason: string) {
   return reverseReconciliation(reconciliationId, reason)
 }
 
-export function statusSummary() {
+export function statusSummary(filters: { dealer?: string } = {}) {
   const counts = db.prepare('SELECT origin, status, COUNT(*) count FROM movements GROUP BY origin, status').all()
+  const dealerClause = filters.dealer ? `AND (',' || dealer || ',') LIKE @dealer` : ''
   const sides = db.prepare(`
     SELECT origin,
       COALESCE(SUM(debit_cents), 0) debits,
@@ -477,9 +703,9 @@ export function statusSummary() {
       COALESCE(SUM(CASE WHEN debit_cents != 0 THEN 1 ELSE 0 END), 0) debit_count,
       COALESCE(SUM(CASE WHEN credit_cents != 0 THEN 1 ELSE 0 END), 0) credit_count
     FROM movements
-    WHERE status != 'ELIMINADO'
+    WHERE status = 'PENDIENTE' ${dealerClause}
     GROUP BY origin
-  `).all() as Array<{ origin: string; debits: number; credits: number; debit_count: number; credit_count: number }>
+  `).all(filters.dealer ? { dealer: `%,${filters.dealer},%` } : {}) as Array<{ origin: string; debits: number; credits: number; debit_count: number; credit_count: number }>
   const side = (origin: string) => sides.find((row) => row.origin === origin) ?? { debits: 0, credits: 0, debit_count: 0, credit_count: 0 }
   const bank = side('BANCO')
   const book = side('LIBRO')
@@ -586,5 +812,21 @@ if (!bookNormalization) {
       })
     })
     db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('book_signs_terminals', '1')`).run()
+  })()
+}
+
+const adjustmentsPending = db.prepare(`SELECT value FROM schema_meta WHERE key = 'adjustments_pending'`).get()
+if (!adjustmentsPending) {
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE movements
+      SET status = 'PENDIENTE', pair_id = NULL
+      WHERE is_adjustment = 1
+        AND status = 'CONCILIADO'
+        AND reconciliation_id IN (
+          SELECT id FROM reconciliations WHERE adjustment_cents != 0 AND status = 'ACTIVA'
+        )
+    `).run()
+    db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('adjustments_pending', '1')`).run()
   })()
 }

@@ -7,7 +7,27 @@ export interface ParsedImport {
   skipped: number
   duplicatesInFile: number
   errors: string[]
+  format?: 'terminal-summary' | 'default'
 }
+
+export type BankMatchFields = {
+  dealer?: string
+  orderNo?: string
+  receipt?: string
+  debitCents?: number
+  creditCents?: number
+}
+
+export const normalizeBankDoc = (orderNo: string) => String(orderNo ?? '').replace(/\D/g, '').replace(/^0+/, '') || '0'
+
+export const bankAmountCents = (row: BankMatchFields) => (row.debitCents ?? 0) + (row.creditCents ?? 0)
+
+export const bankBusinessKey = (row: BankMatchFields) => [
+  String(row.dealer ?? '6'),
+  normalizeBankDoc(row.orderNo ?? ''),
+  String(row.receipt ?? '').trim(),
+  bankAmountCents(row),
+].join('|')
 
 const aliases: Record<string, string[]> = {
   date: ['fecha', 'fecha movimiento', 'fec mov'],
@@ -94,7 +114,7 @@ const deduplicate = (rows: ImportRow[]): Pick<ParsedImport, 'rows' | 'duplicates
 
 function parseFixedWidth(text: string): ParsedImport {
   const lines = text.split(/\r?\n/)
-  const dealer = lines.map((line) => line.match(/ARP(\d{3,6})/)?.[1]).find(Boolean)
+  const dealer = lines.map((line) => line.match(/AR[PC](\d{3,6})/i)?.[1]).find(Boolean)
     ?? '6'
   const rows: ImportRow[] = []
   const errors: string[] = []
@@ -237,6 +257,95 @@ function parseQuiter(buffer: Buffer): ParsedImport {
   return { ...deduplicate(rows), skipped, errors }
 }
 
+const terminalSummaryIndexes = (headers: string[]) => ({
+  client: headers.findIndex((header) => header === 'cliente'),
+  document: headers.findIndex((header) => header === 'nº documento' || header === 'no documento'),
+  receipt: headers.findIndex((header) => header === 'clase de documento'),
+  date: headers.findIndex((header) => header === 'fecha de documento'),
+  amount: headers.findIndex((header) => header === 'importe en moneda local'),
+  notes: headers.findIndex((header) => header === 'texto'),
+})
+
+const terminalDealer = (client: unknown) => String(client ?? '').match(/AR[PC](\d{3,6})/i)?.[1] ?? '6'
+
+const signedAmountCents = (value: unknown) => {
+  const cents = typeof value === 'number' ? Math.round(value * 100) : parseAmount(value)
+  return {
+    debitCents: cents > 0 ? cents : 0,
+    creditCents: cents < 0 ? -cents : 0,
+  }
+}
+
+const terminalSummarySheet = (workbook: XLSX.WorkBook) => {
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) continue
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '', raw: true })
+    if (!matrix.length) continue
+    const headers = (matrix[0] ?? []).map(normalized)
+    const indexes = terminalSummaryIndexes(headers)
+    if (indexes.client >= 0 && indexes.document >= 0 && indexes.receipt >= 0 && indexes.amount >= 0) {
+      return { matrix, indexes }
+    }
+  }
+  return null
+}
+
+export function isTerminalSummaryWorkbook(buffer: Buffer) {
+  const workbook = XLSX.read(buffer, { type: 'buffer' })
+  return Boolean(terminalSummarySheet(workbook))
+}
+
+function parseTerminalSummary(buffer: Buffer): ParsedImport {
+  const workbook = XLSX.read(buffer, { type: 'buffer' })
+  const sheet = terminalSummarySheet(workbook)
+  if (!sheet) throw new Error('El Excel no tiene las columnas de resumen terminal')
+  const { matrix, indexes } = sheet
+  const rows: ImportRow[] = []
+  const errors: string[] = []
+  let skipped = 0
+
+  matrix.slice(1).forEach((row, offset) => {
+    const excelRow = offset + 2
+    const client = row[indexes.client]
+    const documentNo = String(row[indexes.document] ?? '').trim()
+    const rawDate = row[indexes.date]
+    if (!client && !documentNo && !rawDate) {
+      skipped += 1
+      return
+    }
+    try {
+      const date = parseDate(rawDate)
+      const receipt = String(row[indexes.receipt] ?? '').trim()
+      const { debitCents, creditCents } = signedAmountCents(row[indexes.amount])
+      if (!debitCents && !creditCents) {
+        skipped += 1
+        return
+      }
+      const notes = indexes.notes >= 0 ? String(row[indexes.notes] ?? '').trim() : ''
+      const dealer = terminalDealer(client)
+      rows.push({
+        origin: 'BANCO',
+        date,
+        processDate: date,
+        receipt,
+        sector: '41110100',
+        orderNo: documentNo,
+        ref1: '',
+        ref2: '',
+        debitCents,
+        creditCents,
+        notes,
+        dealer,
+        fingerprint: fingerprint(['BANCO', 'TERMINAL', dealer, documentNo, receipt, date, debitCents, creditCents, notes]),
+      })
+    } catch (error) {
+      errors.push(`Fila ${excelRow}: ${error instanceof Error ? error.message : error}`)
+    }
+  })
+  return { ...deduplicate(rows), skipped, errors, format: 'terminal-summary' }
+}
+
 function parseDelimited(text: string, origin: Origin): ParsedImport {
   const lines = text.split(/\r?\n/).filter((line) => line.trim())
   const firstLine = lines[0] ?? ''
@@ -305,7 +414,10 @@ const isFixedWidthBank = (text: string) =>
 export function parseBankFile(buffer: Buffer, filename = ''): ParsedImport {
   const text = decode(buffer)
   if (isFixedWidthBank(text) || /\.txt$/i.test(filename)) return parseFixedWidth(text)
-  if (/\.(xls|xlsx)$/i.test(filename)) return parseQuiter(buffer)
+  if (/\.(xls|xlsx)$/i.test(filename)) {
+    if (isTerminalSummaryWorkbook(buffer)) return parseTerminalSummary(buffer)
+    throw new Error('El Excel de banco no es un resumen terminal reconocido')
+  }
   return parseDelimited(text, 'BANCO')
 }
 

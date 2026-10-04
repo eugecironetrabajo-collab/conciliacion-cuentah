@@ -1,7 +1,14 @@
 import './style.css'
-import { matchesConcept, nextSort, rowAmountCents, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
+import { ASSIGNEE_OPTIONS } from '../../src/assignees.js'
+import { columnAmountCents, matchesConcept, nextSort, referenceOne, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
 import { TERMINALS, movementLabel } from '../../src/terminals.js'
 import { api, escapeHtml as esc, getMovements, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
+import { setupColumnResize, setupQuadrantSplitter } from './resize.js'
+
+const isFormField = (target: EventTarget | null) => {
+  const element = target as HTMLElement | null
+  return Boolean(element?.closest('input, select, textarea, button'))
+}
 
 const dealerOptions = `<option value="">Todas</option>${TERMINALS.map((terminal) => `<option value="${terminal.code}">${terminal.code} · ${terminal.label}</option>`).join('')}`
 
@@ -88,9 +95,11 @@ async function render() {
   const view = document.querySelector<HTMLDivElement>('#view')!
   view.innerHTML = loading()
   try {
+    disposeReconcileKeys?.()
+    disposeReconcileKeys = null
     if (current === 'resumen') await renderSummary(view)
     if (current === 'movimientos') await renderMovements(view)
-    if (current === 'conciliar') await renderReconcile(view)
+    if (current === 'conciliar') disposeReconcileKeys = await renderReconcile(view) ?? null
     if (current === 'importar') renderImport(view)
     if (current === 'reportes') renderReports(view)
     if (current === 'auditoria') await renderAudit(view)
@@ -100,32 +109,41 @@ async function render() {
   }
 }
 
+type StatusPayload = {
+  db: string
+  counts: Array<{ origin: string; status: string; count: number }>
+  statement: {
+    bankDebits: number
+    bankDebitCount: number
+    bankCredits: number
+    bankCreditCount: number
+    bookDebits: number
+    bookDebitCount: number
+    bookCredits: number
+    bookCreditCount: number
+    bankBalance: number
+    bookBalance: number
+  }
+}
+
+const balanceSheetRows = (statement: StatusPayload['statement']) => {
+  const amountCell = (cents: number) => `<td class="number ${cents < 0 ? 'negative' : ''}">$ ${money(cents)}</td>`
+  return `
+    <tr class="total"><td>Saldo banco</td><td class="number"></td>${amountCell(statement.bankBalance)}</tr>
+    <tr><td>(+) Débitos libros</td><td class="number">${statement.bookDebitCount}</td>${amountCell(statement.bookDebits)}</tr>
+    <tr><td>(−) Créditos bancos</td><td class="number">${statement.bankCreditCount}</td>${amountCell(statement.bankCredits)}</tr>
+    <tr><td>(+) Débitos bancos</td><td class="number">${statement.bankDebitCount}</td>${amountCell(statement.bankDebits)}</tr>
+    <tr><td>(−) Créditos libros</td><td class="number">${statement.bookCreditCount}</td>${amountCell(statement.bookCredits)}</tr>
+    <tr class="total"><td>Saldo libros</td><td class="number"></td>${amountCell(statement.bookBalance)}</tr>`
+}
+
 async function renderSummary(root: HTMLElement) {
-  const [status, rows] = await Promise.all([
-    api<{
-      db: string
-      counts: Array<{ origin: string; status: string; count: number }>
-      statement: {
-        bankDebits: number
-        bankDebitCount: number
-        bankCredits: number
-        bankCreditCount: number
-        bookDebits: number
-        bookDebitCount: number
-        bookCredits: number
-        bookCreditCount: number
-        bankBalance: number
-        bookBalance: number
-      }
-    }>('/api/status'),
-    getMovements(),
-  ])
+  const loadStatus = (dealer = '') => api<StatusPayload>(dealer ? `/api/status?dealer=${encodeURIComponent(dealer)}` : '/api/status')
+  const [status, rows] = await Promise.all([loadStatus(), getMovements()])
   const pending = rows.filter((row) => row.status === 'PENDIENTE').length
   const reconciled = rows.filter((row) => row.status === 'CONCILIADO').length
   const reconciliations = new Set(rows.filter((row) => row.reconciliationId).map((row) => row.reconciliationId)).size
   const latest = [...rows].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5)
-  const statement = status.statement
-  const amountCell = (cents: number) => `<td class="number ${cents < 0 ? 'negative' : ''}">$ ${money(cents)}</td>`
   root.innerHTML = `
     ${heading('Panel general', 'Resumen de Cuenta H', 'Saldos de banco y de libros por separado. No se suman entre sí.', '<a class="button primary" href="#/conciliar">Abrir conciliación <span>→</span></a>')}
     <section class="metrics summary-metrics">
@@ -133,17 +151,16 @@ async function renderSummary(root: HTMLElement) {
       <article><div class="metric-icon green">✓</div><span>Conciliaciones</span><strong>${reconciliations}</strong><small>${reconciled} partidas procesadas</small></article>
     </section>
     <section class="panel balance-sheet">
-      <div class="panel-head"><div><h2>Saldos de la cuenta</h2><p>Débitos y créditos de cada origen, sin mezclarlos</p></div></div>
+      <div class="panel-head balance-sheet-head">
+        <div>
+          <h2>Saldos de la cuenta</h2>
+          <p id="balance-sheet-caption">Solo partidas pendientes. Excluye conciliadas y eliminadas.</p>
+        </div>
+        <label class="balance-dealer-filter">Terminal<select id="summary-dealer">${dealerOptions}</select></label>
+      </div>
       <table>
         <thead><tr><th>Concepto</th><th class="number">Partidas</th><th class="number">Importe</th></tr></thead>
-        <tbody>
-          <tr class="total"><td>Saldo banco</td><td class="number"></td>${amountCell(statement.bankBalance)}</tr>
-          <tr><td>(+) Débitos libros</td><td class="number">${statement.bookDebitCount}</td>${amountCell(statement.bookDebits)}</tr>
-          <tr><td>(−) Créditos bancos</td><td class="number">${statement.bankCreditCount}</td>${amountCell(statement.bankCredits)}</tr>
-          <tr><td>(+) Débitos bancos</td><td class="number">${statement.bankDebitCount}</td>${amountCell(statement.bankDebits)}</tr>
-          <tr><td>(−) Créditos libros</td><td class="number">${statement.bookCreditCount}</td>${amountCell(statement.bookCredits)}</tr>
-          <tr class="total"><td>Saldo libros</td><td class="number"></td>${amountCell(statement.bookBalance)}</tr>
-        </tbody>
+        <tbody id="balance-sheet-body">${balanceSheetRows(status.statement)}</tbody>
       </table>
     </section>
     <section class="panel">
@@ -157,10 +174,92 @@ async function renderSummary(root: HTMLElement) {
         </div>`).join('')}</div>
     </section>`
   document.querySelector('#db-badge')!.textContent = status.db
+  const caption = root.querySelector<HTMLElement>('#balance-sheet-caption')
+  const body = root.querySelector<HTMLElement>('#balance-sheet-body')
+  const dealerSelect = root.querySelector<HTMLSelectElement>('#summary-dealer')
+  const updateCaption = (dealer: string) => {
+    if (!caption) return
+    if (!dealer) {
+      caption.textContent = 'Solo partidas pendientes. Excluye conciliadas y eliminadas.'
+      return
+    }
+    const label = TERMINALS.find((terminal) => terminal.code === dealer)?.label ?? dealer
+    caption.textContent = `Saldos pendientes · ${dealer} · ${label}`
+  }
+  dealerSelect?.addEventListener('change', async () => {
+    const dealer = dealerSelect.value
+    const next = await loadStatus(dealer)
+    if (body) body.innerHTML = balanceSheetRows(next.statement)
+    updateCaption(dealer)
+  })
 }
 
 function statusBadge(status: Movement['status']) {
   return `<span class="badge ${status.toLowerCase()}">${status}</span>`
+}
+
+function assigneeOptions(selected: string) {
+  const known = (ASSIGNEE_OPTIONS as readonly string[]).includes(selected)
+  const custom = selected && !known
+    ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>`
+    : ''
+  return `<option value="">Sin asignar</option>${ASSIGNEE_OPTIONS.map((option) =>
+    `<option value="${esc(option)}"${selected === option ? ' selected' : ''}>${esc(option)}</option>`,
+  ).join('')}${custom}<option value="__other__">Otro…</option>`
+}
+
+function assigneeCell(row: Movement) {
+  if (row.status === 'PENDIENTE') {
+    return `<td class="assignee-cell"><select class="assignee-select" data-assignee="${row.id}">${assigneeOptions(row.assignee)}</select></td>`
+  }
+  return `<td class="assignee-cell">${esc(row.assignee || '—')}</td>`
+}
+
+function bindAssigneeCells(
+  root: HTMLElement,
+  onSave: (id: number, assignee: string) => Promise<void>,
+  onRefresh: () => void,
+) {
+  root.querySelectorAll<HTMLSelectElement>('.assignee-select').forEach((select) => {
+    select.addEventListener('click', (event) => event.stopPropagation())
+    select.addEventListener('mousedown', (event) => event.stopPropagation())
+    select.addEventListener('change', async () => {
+      const id = Number(select.dataset.assignee)
+      if (select.value === '__other__') {
+        const input = document.createElement('input')
+        input.type = 'text'
+        input.className = 'assignee-other'
+        input.placeholder = 'Responsable'
+        input.maxLength = 80
+        input.addEventListener('click', (event) => event.stopPropagation())
+        input.addEventListener('mousedown', (event) => event.stopPropagation())
+        select.replaceWith(input)
+        input.focus()
+        const commit = async () => {
+          try {
+            await onSave(id, input.value.trim())
+            onRefresh()
+          } catch (error) {
+            toast(error instanceof Error ? error.message : 'No se pudo guardar el responsable', 'error')
+          }
+        }
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commit()
+          }
+        })
+        input.addEventListener('blur', commit)
+        return
+      }
+      try {
+        await onSave(id, select.value)
+      } catch (error) {
+        toast(error instanceof Error ? error.message : 'No se pudo guardar el responsable', 'error')
+        onRefresh()
+      }
+    })
+  })
 }
 
 async function renderMovements(root: HTMLElement) {
@@ -193,20 +292,36 @@ async function renderMovements(root: HTMLElement) {
       <div class="panel-head"><div><h2>Partidas encontradas</h2><p><span id="row-count">${rows.length}</span> resultados · Doble clic para consultar una conciliación</p></div>
         <div class="bulk-actions"><label><input id="select-visible" type="checkbox"> Seleccionar</label><button class="button secondary" id="delete-selected" disabled>Eliminar</button><button class="button secondary" id="restore-selected" disabled>Restaurar</button><button class="button secondary" id="purge-selected" disabled>Borrar definitivo</button></div>
       </div>
-      <div class="table-scroll"><table class="standard-table"><thead><tr><th></th><th>ID</th><th>Origen</th><th>Terminal</th><th>Estado</th><th>Fecha</th><th>Fecha proc.</th><th>Comprobante</th><th>Referencia</th><th>Detalle</th><th class="number">Débito</th><th class="number">Crédito</th><th>Acción</th></tr></thead><tbody id="movement-body"></tbody></table></div>
+      <div class="table-scroll"><table class="standard-table"><thead><tr><th></th>${movementSortColumns()}</tr></thead><tbody id="movement-body"></tbody></table></div>
     </section><div id="modal-root"></div>`
+  let sourceItems: Movement[] = rows
+  let visibleItems: Movement[] = rows
+  let movementSort: ColumnSort | null = null
+  const saveAssignee = async (id: number, assignee: string) => {
+    const updated = await api<Movement>(`/api/movimientos/${id}/assignee`, {
+      method: 'PATCH',
+      body: JSON.stringify({ assignee }),
+    })
+    const item = visibleItems.find((row) => row.id === id)
+    if (item) item.assignee = updated.assignee
+  }
   const draw = (items: Movement[]) => {
+    sourceItems = items
+    visibleItems = sortMovements(items, movementSort)
     document.querySelector('#row-count')!.textContent = String(items.length)
+    paintSortButtons(root, 'movements', movementSort)
     const manageable = (row: Movement) => !row.isAdjustment && (row.status === 'PENDIENTE' || row.status === 'ELIMINADO')
-    document.querySelector('#movement-body')!.innerHTML = items.map((row) => `<tr ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
+    document.querySelector('#movement-body')!.innerHTML = visibleItems.map((row) => `<tr data-id="${row.id}" data-date="${row.date}" ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
       <td>${manageable(row) ? `<input class="row-check" type="checkbox" data-id="${row.id}" data-status="${row.status}" aria-label="Seleccionar movimiento ${row.id}">` : ''}</td>
       <td class="muted">#${row.id}</td><td><span class="origin-label ${row.origin.toLowerCase()}">${row.origin}</span></td>
       <td>${esc(movementLabel(row.origin, row.dealer, row.sector))}</td>
-      <td>${statusBadge(row.status)}</td><td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
-      <td class="mono">${esc(row.ref1 || row.ref2 || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
+      <td>${statusBadge(row.status)}${row.isAdjustment && row.status === 'PENDIENTE' ? ` <span class="badge pending">Ajuste${row.reconciliationId ? ` #${row.reconciliationId}` : ''}</span>` : ''}</td><td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
+      <td class="mono">${esc(referenceOne(row) || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
       <td class="number">${row.debitCents ? money(row.debitCents) : '—'}</td><td class="number">${row.creditCents ? money(row.creditCents) : '—'}</td>
+      ${assigneeCell(row)}
       <td>${row.status === 'CONCILIADO' ? `<button class="text-button" data-open="${row.reconciliationId}">Ver #${row.reconciliationId}</button>` : `<a class="text-button" href="#/conciliar">Conciliar</a>`}</td>
     </tr>`).join('')
+    bindAssigneeCells(root, saveAssignee, () => draw(sourceItems))
     document.querySelectorAll('[data-open]').forEach((button) => button.addEventListener('click', () => openReconciliationDetail(Number((button as HTMLElement).dataset.open), root)))
     document.querySelectorAll('[data-reconciliation]').forEach((row) => {
       const open = () => openReconciliationDetail(Number((row as HTMLElement).dataset.reconciliation), root)
@@ -282,6 +397,10 @@ async function renderMovements(root: HTMLElement) {
       toast(`${ids.length} movimiento(s) eliminados`)
     })
   }
+  bindSortButtons(root, (button) => {
+    movementSort = nextSort(movementSort, button.dataset.sort as SortKey, button.dataset.column ?? button.dataset.sort ?? '')
+    draw(sourceItems)
+  })
   draw(rows)
   document.querySelector('#f-aplicar')?.addEventListener('click', async () => {
     try {
@@ -329,67 +448,152 @@ async function openReconciliationDetail(id: number, root: HTMLElement) {
 }
 
 function renderReversal(reconciliation: Reconciliation, root: HTMLElement, modalRoot: HTMLElement) {
-  let prepared = false
   const originalRows = reconciliation.movements.filter((row) => !row.isAdjustment)
+  const staged = new Set<number>()
+  const selectedActive = new Set<number>()
+  const selectedStaged = new Set<number>()
+  let activeSort: ColumnSort | null = null
+  let stagedSort: ColumnSort | null = null
   const draw = () => {
+    const activeRows = sortMovements(originalRows.filter((row) => !staged.has(row.id)), activeSort)
+    const stagedRows = sortMovements(originalRows.filter((row) => staged.has(row.id)), stagedSort)
+    const reversalColumns = (grid: 'reversal-active' | 'reversal-staged') => sortableColumns(grid)
     modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal wide reversal-workspace">
-      <div class="modal-head"><div><span class="eyebrow">Reversión de conciliaciones</span><h2>Conciliación N.º ${reconciliation.id}</h2><p>El grupo es indivisible: todas sus partidas se revierten juntas.</p></div><button class="modal-close" aria-label="Cerrar">×</button></div>
-      <div class="reversal-quadrant"><div class="quadrant-head"><div><span class="step">1</span><div><h2>Conciliación activa</h2><p>Doble clic para preparar la reversión completa</p></div></div></div>
-        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody>${prepared ? `<tr><td colspan="13">${empty('Grupo trasladado', 'Las partidas están listas para ser revertidas.')}</td></tr>` : reconciliation.movements.map((row) => ledgerRow(row, 'data-reverse-group tabindex="0"', row.isAdjustment ? 'adjustment-row' : '')).join('')}</tbody></table></div>
+      <div class="modal-head"><div><span class="eyebrow">Reversión de conciliaciones</span><h2>Conciliación N.º ${reconciliation.id}</h2><p>Revierta una selección si el grupo restante queda balanceado, o revierta todo el grupo.</p></div><button class="modal-close" aria-label="Cerrar">×</button></div>
+      <div class="reversal-quadrant"><div class="quadrant-head"><div><span class="step">1</span><div><h2>Conciliación activa</h2><p>Seleccione líneas y bájelas con Enter o el botón.</p></div></div></div>
+        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${reversalColumns('reversal-active')}</tr></thead><tbody>${activeRows.length ? activeRows.map((row) => ledgerRow(row, `data-reverse-active="${row.id}" tabindex="0"`, selectedActive.has(row.id) ? 'selected' : '')).join('') : `<tr><td colspan="13">${empty('Todas las líneas seleccionadas', 'Revise el cuadrante inferior antes de guardar.')}</td></tr>`}</tbody></table></div>
+        <div class="selection-bar"><span>${selectedActive.size} ${selectedActive.size === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}</span><button class="button dark" id="stage-reversal" ${selectedActive.size ? '' : 'disabled'}>Bajar selección ↓</button></div>
       </div>
-      <div class="flow-divider"><span>↓</span><small>Grupo preparado para reversión</small><span>↓</span></div>
-      <div class="reversal-quadrant prepared"><div class="quadrant-head"><div><span class="step green">2</span><div><h2>Partidas a devolver a pendientes</h2><p>La línea de ajuste será anulada y permanecerá en el historial</p></div></div></div>
-        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${ledgerColumns}</tr></thead><tbody>${prepared ? originalRows.map((row) => ledgerRow(row)).join('') : `<tr><td colspan="13">${empty('Sin partidas preparadas', 'Traslade la conciliación completa desde el cuadrante superior.')}</td></tr>`}</tbody></table></div>
+      <div class="flow-divider"><span>↓</span><small>Partidas preparadas para reversión</small><span>↓</span></div>
+      <div class="reversal-quadrant prepared"><div class="quadrant-head"><div><span class="step green">2</span><div><h2>Partidas a devolver a pendientes</h2><p>La línea de ajuste permanece en el historial.</p></div></div></div>
+        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${reversalColumns('reversal-staged')}</tr></thead><tbody>${stagedRows.length ? stagedRows.map((row) => ledgerRow(row, `data-reverse-staged="${row.id}" tabindex="0"`, selectedStaged.has(row.id) ? 'selected' : '')).join('') : `<tr><td colspan="13">${empty('Sin partidas preparadas', 'Seleccione una o más líneas arriba.')}</td></tr>`}</tbody></table></div>
+        <div class="selection-bar"><span>${selectedStaged.size} ${selectedStaged.size === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}</span><button class="button secondary" id="unstage-reversal" ${selectedStaged.size ? '' : 'disabled'}>Subir selección ↑</button></div>
       </div>
-      <label class="reason-field">Motivo de la reversión<textarea id="reversal-reason" rows="2" placeholder="Explique por qué se revierte esta conciliación">${prepared ? '' : ''}</textarea></label>
-      <div class="modal-actions"><button class="button secondary modal-close">Cancelar</button>${prepared ? '<button class="button secondary" id="return-reversal">Devolver arriba</button>' : ''}<button class="button danger-button" id="save-reversal" ${prepared ? '' : 'disabled'}>Guardar reversión</button></div>
+      <div class="ledger-totals"><div><span>Quedan en el grupo</span><strong id="reversal-remaining-difference"></strong></div><div class="difference"><span>Estado</span><strong id="reversal-balance-status"></strong></div></div>
+      <label class="reason-field">Motivo de la reversión<textarea id="reversal-reason" rows="2" placeholder="Explique por qué se revierte esta conciliación"></textarea></label>
+      <div class="modal-actions"><button class="button secondary modal-close">Cancelar</button><button class="button secondary" id="save-full-reversal">Revertir conciliación completa</button><button class="button danger-button" id="save-partial-reversal" ${stagedRows.length ? '' : 'disabled'}>Revertir selección</button></div>
     </section></div>`
+    const remaining = reconciliation.movements.filter((row) => !row.isAdjustment && !staged.has(row.id))
+    const remainingDifference = Math.abs(remaining.reduce((sum, row) => sum + row.debitCents - row.creditCents, 0) + reconciliation.movements.filter((row) => row.isAdjustment).reduce((sum, row) => sum + row.debitCents - row.creditCents, 0))
+    modalRoot.querySelector('#reversal-remaining-difference')!.textContent = money(remainingDifference)
+    modalRoot.querySelector('#reversal-balance-status')!.textContent = remainingDifference === 0 ? 'Balanceado' : 'Desbalanceado'
+    paintSortButtons(modalRoot, 'reversal-active', activeSort)
+    paintSortButtons(modalRoot, 'reversal-staged', stagedSort)
     modalRoot.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', () => modalRoot.innerHTML = ''))
-    modalRoot.querySelectorAll('[data-reverse-group]').forEach((row) => {
-      const stage = () => { prepared = true; draw() }
-      row.addEventListener('dblclick', stage)
-      row.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') stage() })
+    const toggleSelection = (id: number, selected: Set<number>) => {
+      if (selected.has(id)) selected.delete(id)
+      else selected.add(id)
+      draw()
+    }
+    const moveSelection = (from: Set<number>, moveToStaged: boolean, clearSelection: Set<number>) => {
+      from.forEach((id) => moveToStaged ? staged.add(id) : staged.delete(id))
+      from.clear()
+      clearSelection.clear()
+      draw()
+    }
+    modalRoot.querySelectorAll<HTMLElement>('[data-reverse-active]').forEach((row) => {
+      const id = Number(row.dataset.reverseActive)
+      row.addEventListener('click', () => toggleSelection(id, selectedActive))
+      row.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') moveSelection(new Set([id]), true, selectedActive) })
     })
-    modalRoot.querySelector('#return-reversal')?.addEventListener('click', () => { prepared = false; draw() })
-    modalRoot.querySelector('#save-reversal')?.addEventListener('click', async () => {
-      const reason = (modalRoot.querySelector('#reversal-reason') as HTMLTextAreaElement).value.trim()
-      if (!reason) {
-        toast('Indique el motivo de la reversión', 'error')
-        return
-      }
-      await api(`/api/reconciliaciones/${reconciliation.id}/revertir`, { method: 'POST', body: JSON.stringify({ motivo: reason }) })
+    modalRoot.querySelectorAll<HTMLElement>('[data-reverse-staged]').forEach((row) => {
+      const id = Number(row.dataset.reverseStaged)
+      row.addEventListener('click', () => toggleSelection(id, selectedStaged))
+      row.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') moveSelection(selectedStaged, false, selectedActive) })
+    })
+    modalRoot.querySelector('#stage-reversal')?.addEventListener('click', () => moveSelection(selectedActive, true, selectedStaged))
+    modalRoot.querySelector('#unstage-reversal')?.addEventListener('click', () => moveSelection(selectedStaged, false, selectedActive))
+    const reason = () => (modalRoot.querySelector('#reversal-reason') as HTMLTextAreaElement).value.trim()
+    modalRoot.querySelector('#save-full-reversal')?.addEventListener('click', async () => {
+      if (!reason()) return toast('Indique el motivo de la reversión', 'error')
+      await api(`/api/reconciliaciones/${reconciliation.id}/revertir`, { method: 'POST', body: JSON.stringify({ motivo: reason() }) })
       modalRoot.innerHTML = ''
-      toast(`Conciliación ${reconciliation.id} revertida. ${originalRows.length} partidas volvieron a pendientes.`)
+      toast(`Conciliación ${reconciliation.id} revertida completamente`)
       await renderMovements(root)
+    })
+    modalRoot.querySelector('#save-partial-reversal')?.addEventListener('click', async () => {
+      if (remainingDifference !== 0) return toast('La reversión parcial dejaría el grupo desbalanceado', 'error')
+      if (!reason()) return toast('Indique el motivo de la reversión', 'error')
+      await api(`/api/reconciliaciones/${reconciliation.id}/revertir-parcial`, { method: 'POST', body: JSON.stringify({ movementIds: [...staged], motivo: reason() }) })
+      modalRoot.innerHTML = ''
+      toast(`${staged.size} partida(s) volvieron a pendientes`)
+      await renderMovements(root)
+    })
+    bindSortButtons(modalRoot, (button) => {
+      const sort = button.dataset.grid === 'reversal-active' ? activeSort : stagedSort
+      const next = nextSort(sort, button.dataset.sort as SortKey, button.dataset.column ?? '')
+      if (button.dataset.grid === 'reversal-active') activeSort = next
+      else stagedSort = next
+      draw()
     })
   }
   draw()
 }
 
+const sortHeading = (grid: string, label: string, key: SortKey, column: string = key, numeric = false) =>
+  `<th class="${numeric ? 'number' : ''}"><button type="button" class="sort-button" data-sort="${key}" data-column="${column}" data-grid="${grid}" data-label="${label}" aria-sort="none" title="Doble clic para ordenar">${label}</button></th>`
+
+const bindSortButtons = (root: ParentNode, handler: (button: HTMLButtonElement) => void) => {
+  root.querySelectorAll<HTMLButtonElement>('.sort-button').forEach((button) => {
+    button.addEventListener('dblclick', (event) => {
+      event.preventDefault()
+      handler(button)
+    })
+  })
+}
+
+const paintSortButtons = (root: ParentNode, grid: string, sort: ColumnSort | null) => {
+  root.querySelectorAll<HTMLButtonElement>(`.sort-button[data-grid="${grid}"]`).forEach((button) => {
+    const active = Boolean(sort && sort.column === button.dataset.column)
+    button.classList.toggle('active', active)
+    const label = button.dataset.label ?? ''
+    button.textContent = active ? `${label} ${sort!.direction === 'asc' ? '↑' : '↓'}` : label
+    button.setAttribute('aria-sort', active ? (sort!.direction === 'asc' ? 'ascending' : 'descending') : 'none')
+  })
+}
+
+const movementSortColumns = () => `
+  ${sortHeading('movements', 'ID', 'id')}
+  ${sortHeading('movements', 'Origen', 'origin')}
+  ${sortHeading('movements', 'Terminal', 'terminal')}
+  ${sortHeading('movements', 'Estado', 'status')}
+  ${sortHeading('movements', 'Fecha', 'date')}
+  ${sortHeading('movements', 'Fecha proc.', 'processDate')}
+  ${sortHeading('movements', 'Comprobante', 'receipt')}
+  ${sortHeading('movements', 'Referencia', 'reference')}
+  ${sortHeading('movements', 'Detalle', 'notes')}
+  ${sortHeading('movements', 'Débito', 'debit', 'debit', true)}
+  ${sortHeading('movements', 'Crédito', 'credit', 'credit', true)}
+  ${sortHeading('movements', 'Responsable', 'assignee')}
+  <th>Acción</th>`
+
 const ledgerColumns = `
   <th>Fecha</th><th>Fecha proc.</th><th>Terminal</th><th>Comprobante</th><th>Sector</th><th>Orden</th>
-  <th>Ref. 1</th><th>Ref. 2</th><th class="number">Débitos libros</th>
+  <th>Referencia 1</th><th>Referencia 2</th><th class="number">Débitos libros</th>
   <th class="number">Créditos bancos</th><th class="number">Débitos bancos</th>
   <th class="number">Créditos libros</th><th>Observaciones</th>`
 
-function sortableColumns(grid: 'pending' | 'staged') {
-  const heading = (label: string, key: SortKey, column: string = key, numeric = false) =>
-    `<th class="${numeric ? 'number' : ''}"><button type="button" class="sort-button" data-sort="${key}" data-column="${column}" data-grid="${grid}" data-label="${label}" aria-sort="none">${label}</button></th>`
+function sortableColumns(grid: 'pending' | 'staged' | 'reversal-active' | 'reversal-staged') {
   return `
-    ${heading('Fecha', 'date')}
-    ${heading('Fecha proc.', 'processDate')}
-    <th>Terminal</th><th>Comprobante</th><th>Sector</th><th>Orden</th><th>Ref. 1</th><th>Ref. 2</th>
-    ${heading('Débitos libros', 'amount', 'book-debit', true)}
-    ${heading('Créditos bancos', 'amount', 'bank-credit', true)}
-    ${heading('Débitos bancos', 'amount', 'bank-debit', true)}
-    ${heading('Créditos libros', 'amount', 'book-credit', true)}
-    ${heading('Observaciones', 'notes')}`
+    ${sortHeading(grid, 'Fecha', 'date')}
+    ${sortHeading(grid, 'Fecha proc.', 'processDate')}
+    ${sortHeading(grid, 'Terminal', 'terminal')}
+    ${sortHeading(grid, 'Comprobante', 'receipt')}
+    ${sortHeading(grid, 'Sector', 'sector')}
+    ${sortHeading(grid, 'Orden', 'orderNo')}
+    ${sortHeading(grid, 'Referencia 1', 'reference')}
+    ${sortHeading(grid, 'Referencia 2', 'reference2')}
+    ${sortHeading(grid, 'Débitos libros', 'amount', 'book-debit', true)}
+    ${sortHeading(grid, 'Créditos bancos', 'amount', 'bank-credit', true)}
+    ${sortHeading(grid, 'Débitos bancos', 'amount', 'bank-debit', true)}
+    ${sortHeading(grid, 'Créditos libros', 'amount', 'book-credit', true)}
+    ${sortHeading(grid, 'Observaciones', 'notes')}`
 }
 
 function ledgerRow(row: Movement, attributes = '', extraClass = '') {
   return `<tr ${attributes} class="${extraClass}">
     <td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(movementLabel(row.origin, row.dealer, row.sector))}</td><td>${esc(row.receipt)}</td>
-    <td>${esc(row.sector || '—')}</td><td>${esc(row.orderNo)}</td><td class="mono">${esc(row.ref1)}</td><td class="mono">${esc(row.ref2)}</td>
+    <td>${esc(row.sector || '—')}</td><td>${esc(row.orderNo)}</td><td class="mono">${esc(referenceOne(row))}</td><td class="mono">${esc(row.ref2)}</td>
     <td class="number amount">${row.origin === 'LIBRO' && row.debitCents ? money(row.debitCents) : ''}</td>
     <td class="number amount">${row.origin === 'BANCO' && row.creditCents ? money(row.creditCents) : ''}</td>
     <td class="number amount">${row.origin === 'BANCO' && row.debitCents ? money(row.debitCents) : ''}</td>
@@ -404,12 +608,11 @@ async function renderReconcile(root: HTMLElement) {
   let pendingSort: ColumnSort | null = null
   let stagedSort: ColumnSort | null = null
   let stagedAutomatically = false
-  let selectedBank: number | null = null
-  let selectedBook: number | null = null
-  let checked: Candidate | null = null
+  const selectedPending = new Set<number>()
+  const stagedSelection = new Set<number>()
 
   root.innerHTML = `
-    ${heading('Mesa de trabajo', 'Conciliar partidas', 'Haga doble clic para bajar partidas individualmente o use la búsqueda automática.', `
+    ${heading('Mesa de trabajo', 'Conciliar partidas', 'Seleccione varias líneas y use Enter o los botones para moverlas entre cuadrantes.', `
       <button class="button secondary" id="auto-preview">Búsqueda automática</button>
       <button class="button primary" id="confirm-all" disabled>Confirmar conciliación <span>→</span></button>`)}
     <section class="reconcile-filters">
@@ -418,42 +621,55 @@ async function renderReconcile(root: HTMLElement) {
       <label>Fecha desde<input id="r-from" type="date"></label>
       <label>Fecha hasta<input id="r-to" type="date"></label>
       <label>Concepto<input id="r-concepto" type="search" placeholder="comp pp" autocomplete="off"></label>
+      <button class="button secondary" id="r-aplicar">Buscar partidas</button>
       <button class="icon-button" id="refresh" aria-label="Actualizar">↻</button>
     </section>
+    <div class="reconcile-workspace">
     <section class="quadrant">
       <div class="quadrant-head">
         <div><span class="step">1</span><div><h2>Partidas pendientes</h2><p>Doble clic para mover una línea al cuadrante inferior</p></div></div>
         <div class="legend"><span><i class="bank"></i>Banco</span><span><i class="book"></i>Libros</span><b id="pending-count"></b></div>
       </div>
-      <div class="ledger-wrap top-ledger"><table class="ledger"><thead><tr>${sortableColumns('pending')}</tr></thead><tbody id="pending-grid"></tbody></table></div>
+      <div class="ledger-wrap top-ledger"><table class="ledger" data-resize="pending"><thead><tr>${sortableColumns('pending')}</tr></thead><tbody id="pending-grid"></tbody></table></div>
       <div class="selection-bar" id="selection-bar">
-        <div><span class="selection-status">Seleccione dos partidas</span><small>Una bancaria y una contable</small></div>
-        <div class="selection-difference" id="selection-difference"></div>
-        <button class="button dark" id="stage-pair" disabled>Mover al cuadrante inferior ↓</button>
+        <div><span class="selection-status">0 partidas seleccionadas</span><small>Seleccione filas y presione Enter para moverlas entre cuadrantes</small></div>
+        <button class="button dark" id="stage-pair" disabled>Bajar selección ↓</button>
       </div>
     </section>
-    <div class="flow-divider"><span>↓</span><small>Partidas preparadas para conciliación</small><span>↓</span></div>
+    <div class="quadrant-splitter" role="separator" aria-label="Ajustar altura de cuadrantes"><span>↕</span><small>Arrastre para cambiar el alto · Partidas preparadas para conciliación</small></div>
     <section class="quadrant prepared">
       <div class="quadrant-head">
-        <div><span class="step green">2</span><div><h2>Conciliación preparada</h2><p>Revise las contrapartidas antes de confirmar</p></div></div>
+        <div><span class="step green">2</span><div><h2>Conciliación preparada</h2><p>Seleccione líneas y use Enter o el botón para devolverlas arriba</p></div></div>
         <span class="badge pending" id="staged-count">0 partidas</span>
       </div>
-      <div class="ledger-wrap bottom-ledger"><table class="ledger"><thead><tr>${sortableColumns('staged')}<th class="action-col"></th></tr></thead><tbody id="staged-grid"></tbody></table></div>
+      <div class="ledger-wrap bottom-ledger"><table class="ledger" data-resize="staged"><thead><tr>${sortableColumns('staged')}<th class="action-col"></th></tr></thead><tbody id="staged-grid"></tbody></table></div>
       <div class="ledger-totals">
         <div><span>Total débitos</span><strong id="total-debits">0,00</strong></div>
         <div><span>Total créditos</span><strong id="total-credits">0,00</strong></div>
         <div class="difference"><span>Diferencia</span><strong id="total-difference">0,00</strong></div>
       </div>
-    </section>`
+      <div class="selection-bar"><span id="staged-selection-status">0 partidas seleccionadas</span><button class="button secondary" id="unstage-selection" disabled>Subir selección ↑</button></div>
+    </section>
+    </div>`
 
-  const paintSort = (grid: 'pending' | 'staged', sort: ColumnSort | null) => {
-    root.querySelectorAll<HTMLButtonElement>(`.sort-button[data-grid="${grid}"]`).forEach((button) => {
-      const active = Boolean(sort && button.dataset.column === sort.column)
-      button.classList.toggle('active', active)
-      const label = button.dataset.label ?? ''
-      button.textContent = active ? `${label} ${sort!.direction === 'asc' ? '↑' : '↓'}` : label
-      button.setAttribute('aria-sort', active ? (sort!.direction === 'asc' ? 'ascending' : 'descending') : 'none')
-    })
+  const stageSelected = () => {
+    selectedPending.forEach((id) => staged.add(id))
+    selectedPending.clear()
+    stagedAutomatically = false
+    draw()
+  }
+
+  const unstageSelected = () => {
+    stagedSelection.forEach((id) => staged.delete(id))
+    stagedSelection.clear()
+    draw()
+  }
+
+  const setupResize = () => {
+    const pendingTable = root.querySelector<HTMLTableElement>('.top-ledger .ledger')
+    const stagedTable = root.querySelector<HTMLTableElement>('.bottom-ledger .ledger')
+    if (pendingTable) setupColumnResize(pendingTable, 'cuenta-h:col-widths:conciliar-pending')
+    if (stagedTable) setupColumnResize(stagedTable, 'cuenta-h:col-widths:conciliar-staged')
   }
 
   const draw = () => {
@@ -464,50 +680,35 @@ async function renderReconcile(root: HTMLElement) {
     )
     const grid = document.querySelector('#pending-grid')!
     grid.innerHTML = available.length
-      ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" data-date="${row.date}" data-amount="${rowAmountCents(row)}" data-notes="${esc(row.notes)}" tabindex="0"`, [
-          row.id === selectedBank || row.id === selectedBook ? 'selected' : '',
-          checked && (row.id === checked.bankId || row.id === checked.bookId) ? 'matched' : '',
+      ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" data-date="${row.date}" data-bank-debit="${columnAmountCents(row, 'bank-debit')}" data-notes="${esc(row.notes)}" tabindex="0"`, [
+          selectedPending.has(row.id) ? 'selected' : '',
         ].join(' '))).join('')
       : `<tr><td colspan="13">${empty('Sin partidas pendientes', 'Importe nuevos movimientos o confirme las partidas preparadas.')}</td></tr>`
     document.querySelector('#pending-count')!.textContent = `${available.length} partidas`
-    paintSort('pending', pendingSort)
+    paintSortButtons(root, 'pending', pendingSort)
     document.querySelectorAll('[data-sel]').forEach((node) => {
-      const select = async () => {
-        const row = rows.find((item) => item.id === Number((node as HTMLElement).dataset.sel))!
-        if (row.origin === 'BANCO') selectedBank = selectedBank === row.id ? null : row.id
-        else selectedBook = selectedBook === row.id ? null : row.id
-        checked = null
-        if (selectedBank && selectedBook) {
-          checked = await api<Candidate>('/api/reconcile/check', {
-            method: 'POST', body: JSON.stringify({ bankId: selectedBank, bookId: selectedBook }),
-          })
-        }
+      const select = () => {
+        const id = Number((node as HTMLElement).dataset.sel)
+        if (selectedPending.has(id)) selectedPending.delete(id)
+        else selectedPending.add(id)
         draw()
       }
-      let clickTimer: number | undefined
-      node.addEventListener('click', () => {
-        window.clearTimeout(clickTimer)
-        clickTimer = window.setTimeout(select, 220)
-      })
+      node.addEventListener('click', select)
       node.addEventListener('dblclick', (event) => {
         event.preventDefault()
-        window.clearTimeout(clickTimer)
         staged.add(Number((node as HTMLElement).dataset.sel))
-        selectedBank = selectedBook = null
-        checked = null
+        selectedPending.delete(Number((node as HTMLElement).dataset.sel))
         stagedAutomatically = false
         draw()
       })
       node.addEventListener('keydown', (event) => {
-        if ((event as KeyboardEvent).key === 'Enter') {
-          staged.add(Number((node as HTMLElement).dataset.sel))
-          selectedBank = selectedBook = null
-          checked = null
-          stagedAutomatically = false
-          draw()
-        } else if ((event as KeyboardEvent).key === ' ') select()
+        if ((event as KeyboardEvent).key === ' ') {
+          event.preventDefault()
+          select()
+        }
       })
     })
+    setupResize()
     drawSelection()
     drawStaged()
   }
@@ -515,44 +716,38 @@ async function renderReconcile(root: HTMLElement) {
   const drawSelection = () => {
     const bar = document.querySelector('#selection-bar')!
     const label = bar.querySelector('.selection-status')!
-    const hint = bar.querySelector('small')!
-    const difference = document.querySelector('#selection-difference')!
     const button = document.querySelector<HTMLButtonElement>('#stage-pair')!
-    if (checked) {
-      label.textContent = checked.differenceCents === 0 ? 'Contrapartida compatible' : 'Los importes no compensan'
-      hint.textContent = checked.reason
-      difference.innerHTML = `<span>Diferencia</span><strong>${money(checked.differenceCents)}</strong>`
-      button.disabled = false
-      bar.classList.add('ready')
-    } else {
-      label.textContent = selectedBank || selectedBook ? 'Falta seleccionar la contrapartida' : 'Seleccione dos partidas'
-      hint.textContent = selectedBank ? 'Ahora seleccione una línea de libros' : selectedBook ? 'Ahora seleccione una línea bancaria' : 'Una bancaria y una contable'
-      difference.innerHTML = ''
-      button.disabled = true
-      bar.classList.remove('ready')
-    }
+    label.textContent = `${selectedPending.size} ${selectedPending.size === 1 ? 'partida seleccionada' : 'partidas seleccionadas'}`
+    button.disabled = selectedPending.size === 0
+    bar.classList.toggle('ready', selectedPending.size > 0)
   }
 
   const drawStaged = () => {
     const grid = document.querySelector('#staged-grid')!
     const stagedRows = sortMovements(rows.filter((row) => staged.has(row.id)), stagedSort)
-    paintSort('staged', stagedSort)
-    grid.innerHTML = stagedRows.length ? stagedRows.map((row) => `<tr class="staged-line" data-staged-line="${row.id}">
+    paintSortButtons(root, 'staged', stagedSort)
+    grid.innerHTML = stagedRows.length ? stagedRows.map((row) => `<tr class="staged-line ${stagedSelection.has(row.id) ? 'selected' : ''}" data-staged-line="${row.id}" tabindex="0">
       ${ledgerRow(row).replace(/^<tr[^>]*>|<\/tr>$/g, '')}
       <td class="action-col"><button class="remove-pair" data-remove="${row.id}" title="Devolver arriba">↑</button></td>
     </tr>`).join('') : `<tr><td colspan="14">${empty('Todavía no hay partidas preparadas', 'Haga doble clic arriba o ejecute la búsqueda automática.')}</td></tr>`
     document.querySelector('#staged-count')!.textContent = `${stagedRows.length} ${stagedRows.length === 1 ? 'partida' : 'partidas'}`
-    const hasBank = stagedRows.some((row) => row.origin === 'BANCO')
-    const hasBook = stagedRows.some((row) => row.origin === 'LIBRO')
-    document.querySelector<HTMLButtonElement>('#confirm-all')!.disabled = !hasBank || !hasBook
+    document.querySelector<HTMLButtonElement>('#confirm-all')!.disabled = stagedRows.length < 2
     document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', () => {
       staged.delete(Number((button as HTMLElement).dataset.remove))
       draw()
     }))
-    document.querySelectorAll('[data-staged-line]').forEach((line) => line.addEventListener('dblclick', () => {
-      staged.delete(Number((line as HTMLElement).dataset.stagedLine))
-      draw()
-    }))
+    document.querySelectorAll('[data-staged-line]').forEach((line) => {
+      const id = Number((line as HTMLElement).dataset.stagedLine)
+      line.addEventListener('click', () => {
+        if (stagedSelection.has(id)) stagedSelection.delete(id)
+        else stagedSelection.add(id)
+        draw()
+      })
+      line.addEventListener('dblclick', () => { staged.delete(id); stagedSelection.delete(id); draw() })
+    })
+    setupResize()
+    document.querySelector('#staged-selection-status')!.textContent = `${stagedSelection.size} ${stagedSelection.size === 1 ? 'partida seleccionada' : 'partidas seleccionadas'}`
+    document.querySelector<HTMLButtonElement>('#unstage-selection')!.disabled = stagedSelection.size === 0
     const debits = stagedRows.reduce((sum, row) => sum + row.debitCents, 0)
     const credits = stagedRows.reduce((sum, row) => sum + row.creditCents, 0)
     document.querySelector('#total-debits')!.textContent = money(debits)
@@ -560,20 +755,50 @@ async function renderReconcile(root: HTMLElement) {
     document.querySelector('#total-difference')!.textContent = money(Math.abs(debits - credits))
   }
 
-  document.querySelector('#stage-pair')!.addEventListener('click', () => {
-    if (!checked) return
-    staged.add(checked.bankId)
-    staged.add(checked.bookId)
-    selectedBank = selectedBook = null
-    checked = null
-    stagedAutomatically = false
-    draw()
-  })
+  document.querySelector('#stage-pair')!.addEventListener('click', stageSelected)
+  document.querySelector('#unstage-selection')!.addEventListener('click', unstageSelected)
+  const onReconcileEnter = (event: KeyboardEvent) => {
+    if (event.key !== 'Enter' || isFormField(event.target)) return
+    if (!root.isConnected || !location.hash.startsWith('#/conciliar')) return
+    if (selectedPending.size > 0) {
+      event.preventDefault()
+      stageSelected()
+      return
+    }
+    if (stagedSelection.size > 0) {
+      event.preventDefault()
+      unstageSelected()
+      return
+    }
+    const focused = document.activeElement as HTMLElement | null
+    const pendingId = focused?.dataset.sel
+    if (pendingId) {
+      event.preventDefault()
+      staged.add(Number(pendingId))
+      selectedPending.delete(Number(pendingId))
+      stagedAutomatically = false
+      draw()
+      return
+    }
+    const stagedId = focused?.dataset.stagedLine
+    if (stagedId) {
+      event.preventDefault()
+      staged.delete(Number(stagedId))
+      stagedSelection.delete(Number(stagedId))
+      draw()
+    }
+  }
+  document.addEventListener('keydown', onReconcileEnter)
+  const topLedger = root.querySelector<HTMLElement>('.top-ledger')
+  const bottomLedger = root.querySelector<HTMLElement>('.bottom-ledger')
+  const splitter = root.querySelector<HTMLElement>('.quadrant-splitter')
+  if (topLedger && bottomLedger && splitter) {
+    setupQuadrantSplitter(topLedger, bottomLedger, splitter, 'cuenta-h:quadrant-heights')
+  }
   document.querySelector('#auto-preview')!.addEventListener('click', async () => {
     const proposal = await api<Candidate[]>('/api/reconcile/preview', { method: 'POST', body: '{}' })
     proposal.forEach((pair) => {
-      staged.add(pair.bankId)
-      staged.add(pair.bookId)
+      pair.movementIds.forEach((id) => staged.add(id))
     })
     stagedAutomatically = true
     draw()
@@ -591,18 +816,33 @@ async function renderReconcile(root: HTMLElement) {
       openAdjustmentModal(difference, saveReconciliation)
     }
   })
-  root.querySelectorAll<HTMLButtonElement>('.sort-button').forEach((button) => {
-    button.addEventListener('click', () => {
-      const key = button.dataset.sort as SortKey
-      const column = button.dataset.column ?? key
-      if (button.dataset.grid === 'pending') pendingSort = nextSort(pendingSort, key, column)
-      else stagedSort = nextSort(stagedSort, key, column)
-      draw()
-    })
+  bindSortButtons(root, (button) => {
+    const key = button.dataset.sort as SortKey
+    const column = button.dataset.column ?? key
+    if (button.dataset.grid === 'pending') pendingSort = nextSort(pendingSort, key, column)
+    else stagedSort = nextSort(stagedSort, key, column)
+    draw()
   })
   document.querySelector('#r-concepto')!.addEventListener('input', () => draw())
+  document.querySelector('#r-aplicar')!.addEventListener('click', async () => {
+    try {
+      const params = new URLSearchParams({ estado: 'PENDIENTE' })
+      const value = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value
+      const filters = [['dealer', value('#r-dealer')], ['sector', value('#r-sector')], ['desde', value('#r-from')], ['hasta', value('#r-to')]]
+      filters.forEach(([key, filterValue]) => { if (filterValue) params.set(key, filterValue) })
+      rows = await getMovements(`?${params}`)
+      selectedPending.clear()
+      draw()
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'No se pudo buscar', 'error')
+    }
+  })
   document.querySelector('#refresh')!.addEventListener('click', async () => {
-    rows = await getMovements('?estado=PENDIENTE')
+    const params = new URLSearchParams({ estado: 'PENDIENTE' })
+    const value = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value
+    const filters = [['dealer', value('#r-dealer')], ['sector', value('#r-sector')], ['desde', value('#r-from')], ['hasta', value('#r-to')]]
+    filters.forEach(([key, filterValue]) => { if (filterValue) params.set(key, filterValue) })
+    rows = await getMovements(`?${params}`)
     draw()
   })
   const saveReconciliation = async (adjustment?: Record<string, string>) => {
@@ -622,13 +862,13 @@ async function renderReconcile(root: HTMLElement) {
     const modal = document.createElement('div')
     modal.className = 'modal-backdrop'
     modal.innerHTML = `<section class="modal adjustment-modal">
-      <div class="modal-head"><div><span class="eyebrow">Partida de diferencia</span><h2>Completar ajuste contable</h2><p>Se generará una línea de ${side} por ${money(Math.abs(difference))}.</p></div><button class="modal-close">×</button></div>
+      <div class="modal-head"><div><span class="eyebrow">Partida de diferencia</span><h2>Completar ajuste contable</h2><p>Se generará una línea pendiente de ${side} por ${money(Math.abs(difference))}. Quedará visible en movimientos hasta contabilizarla en Quiter.</p></div><button class="modal-close">×</button></div>
       <div class="adjustment-preview"><span>${side}</span><strong>${money(Math.abs(difference))}</strong></div>
       <div class="adjustment-form">
         <label class="full">Explicación obligatoria<textarea id="adj-reason" rows="3" placeholder="Indique a qué se debe la diferencia"></textarea></label>
         <label>Fecha<input id="adj-date" type="date"></label><label>Comprobante<input id="adj-receipt" placeholder="AJDIF"></label>
         <label>Sector<input id="adj-sector" placeholder="*"></label><label>Orden<input id="adj-order"></label>
-        <label>Ref. 1<input id="adj-ref1"></label><label>Ref. 2<input id="adj-ref2"></label>
+        <label>Referencia 1<input id="adj-ref1"></label><label>Referencia 2<input id="adj-ref2"></label>
       </div>
       <div class="modal-actions"><button class="button secondary modal-close">Cancelar</button><button class="button primary" id="save-adjustment">Crear ajuste y confirmar</button></div>
     </section>`
@@ -651,7 +891,10 @@ async function renderReconcile(root: HTMLElement) {
     })
   }
   draw()
+  return () => document.removeEventListener('keydown', onReconcileEnter)
 }
+
+let disposeReconcileKeys: (() => void) | null = null
 
 function renderImport(root: HTMLElement) {
   root.innerHTML = `
@@ -659,8 +902,8 @@ function renderImport(root: HTMLElement) {
     <div class="notice"><span>i</span><div><b>Importación y conciliación son pasos separados</b><p>Después de importar, vaya a Conciliar cuando desee buscar contrapartidas.</p></div></div>
     <section class="import-grid">
       <article class="panel upload-card">
-        <span class="upload-icon bank">B</span><h2>Movimientos bancarios</h2><p>Listado Stellantis en TXT, CSV, XLS o XLSX.</p>
-        <label class="dropzone" id="dz-txt"><input type="file" accept=".txt,.csv" data-origin="banco" multiple><span>↑</span><b>Seleccione uno o varios TXT</b><small>Se eliminan duplicados entre archivos</small></label>
+        <span class="upload-icon bank">B</span><h2>Movimientos bancarios</h2><p>Listado Stellantis en TXT, CSV, XLS o XLSX. El resumen terminal solo agrega partidas nuevas.</p>
+        <label class="dropzone" id="dz-txt"><input type="file" accept=".txt,.csv,.xls,.xlsx" data-origin="banco" multiple><span>↑</span><b>Seleccione uno o varios archivos</b><small>TXT, CSV, XLS o XLSX · El resumen terminal omite partidas ya cargadas</small></label>
         <p class="selected-files" data-names="banco"></p>
         <div class="upload-result" data-result="banco"></div>
       </article>
@@ -685,14 +928,17 @@ function renderImport(root: HTMLElement) {
         inserted: number
         duplicates: number
         skipped: number
+        skippedExisting: number
+        cleanedDuplicates: number
         pending: boolean
         reconciled: boolean
         errors: string[]
-        files: Array<{ name: string; inserted: number; duplicates: number; skipped: number; errors: string[] }>
+        files: Array<{ name: string; inserted: number; duplicates: number; skipped: number; skippedExisting: number; cleanedDuplicates: number; errors: string[] }>
       }>(`/api/import/${origin}`, { method: 'POST', body: data })
-      result.innerHTML = `<div class="success-result"><b>${imported.inserted} partidas nuevas · pendientes</b><span>${imported.duplicates} duplicadas · ${imported.skipped} omitidas · Sin conciliación automática</span></div>
-        <table class="import-summary"><thead><tr><th>Archivo</th><th>Nuevas</th><th>Duplicadas</th><th>Omitidas</th><th>Errores</th></tr></thead><tbody>
-        ${imported.files.map((file) => `<tr><td>${esc(file.name)}</td><td>${file.inserted}</td><td>${file.duplicates}</td><td>${file.skipped}</td><td>${file.errors.length}</td></tr>`).join('')}
+      const cleanedLabel = imported.cleanedDuplicates ? ` · ${imported.cleanedDuplicates} duplicados corregidos` : ''
+      result.innerHTML = `<div class="success-result"><b>${imported.inserted} partidas nuevas · pendientes</b><span>${imported.duplicates} duplicadas · ${imported.skippedExisting} ya existían · ${imported.skipped} omitidas${cleanedLabel} · Sin conciliación automática</span></div>
+        <table class="import-summary"><thead><tr><th>Archivo</th><th>Nuevas</th><th>Duplicadas</th><th>Ya existían</th><th>Corregidos</th><th>Omitidas</th><th>Errores</th></tr></thead><tbody>
+        ${imported.files.map((file) => `<tr><td>${esc(file.name)}</td><td>${file.inserted}</td><td>${file.duplicates}</td><td>${file.skippedExisting}</td><td>${file.cleanedDuplicates}</td><td>${file.skipped}</td><td>${file.errors.length}</td></tr>`).join('')}
         </tbody></table>
         ${imported.errors.length ? `<div class="error-result">${imported.errors.slice(0, 4).map(esc).join('<br>')}</div>` : ''}`
       toast('Archivo importado. No se ejecutó ninguna conciliación.')
@@ -706,7 +952,7 @@ function renderReports(root: HTMLElement) {
   root.innerHTML = `
     ${heading('Exportación', 'Reportes', 'Descargue movimientos para análisis o archivo.')}
     <section class="panel report-card">
-      <div><span class="report-icon">↗</span><h2>Reporte de movimientos</h2><p>El archivo CSV es compatible con Excel y conserva importes y referencias.</p></div>
+      <div><span class="report-icon">↗</span><h2>Reporte de movimientos</h2><p>El archivo CSV es compatible con Excel e incluye importes, referencias y el responsable pendiente.</p></div>
       <form id="report-form" class="report-form">
         <label>Estado<select name="estado"><option value="">Todos</option><option>PENDIENTE</option><option>CONCILIADO</option></select></label>
         <label>Origen<select name="origen"><option value="">Todos</option><option>BANCO</option><option>LIBRO</option></select></label>

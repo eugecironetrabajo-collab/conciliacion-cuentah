@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { automaticProposal, balanceSummary, candidateFor, matchesConcept, nextSort, rowAmountCents, sortMovements } from '../src/reconcile.js'
+import { automaticProposal, balanceSummary, candidateFor, columnAmountCents, matchesConcept, nextSort, referenceOne, rowAmountCents, sortMovements } from '../src/reconcile.js'
 import { parseAmount, parseText } from '../src/importers.js'
 import type { Movement } from '../src/types.js'
 
@@ -16,6 +16,7 @@ const movement = (values: Partial<Movement> & Pick<Movement, 'id' | 'origin'>): 
   debitCents: 0,
   creditCents: 0,
   notes: '',
+  assignee: '',
   dealer: '6',
   pairId: null,
   ...values,
@@ -39,7 +40,18 @@ test('automatic proposal never reuses a movement', () => {
   ]
   const proposal = automaticProposal(rows)
   assert.equal(proposal.length, 1)
-  assert.equal(proposal[0].bookId, 3)
+  assert.deepEqual(proposal[0]?.movementIds.sort(), [1, 3])
+})
+
+test('automatic proposal matches libro credit with libro debit', () => {
+  const rows = [
+    movement({ id: 1, origin: 'LIBRO', creditCents: 50_000 }),
+    movement({ id: 2, origin: 'LIBRO', debitCents: 50_000 }),
+    movement({ id: 3, origin: 'BANCO', debitCents: 50_000 }),
+  ]
+  const proposal = automaticProposal(rows)
+  assert.equal(proposal.length, 1)
+  assert.deepEqual(proposal[0]?.movementIds.sort(), [1, 2])
 })
 
 test('1:N reconciliation creates a credit-book adjustment when debits are greater', () => {
@@ -67,21 +79,37 @@ test('N:1 reconciliation creates a debit-book adjustment when credits are greate
   assert.equal(balanceSummary(rows).adjustmentCents, 5_000)
 })
 
-test('amount sort reads every column as one value, largest first', () => {
+test('amount sort uses the visible column value, largest first', () => {
   const rows = [
     movement({ id: 1, origin: 'BANCO', debitCents: 2_000 }),
     movement({ id: 2, origin: 'BANCO', creditCents: 1_500 }),
     movement({ id: 3, origin: 'LIBRO', debitCents: 1_800 }),
   ]
   assert.deepEqual(rows.map(rowAmountCents), [2_000, 1_500, 1_800])
-  const largestFirst = nextSort(null, 'amount', 'bank-debit')
-  assert.equal(largestFirst.direction, 'desc')
-  assert.deepEqual(sortMovements(rows, largestFirst).map((row) => row.id), [1, 3, 2])
-  const smallestFirst = nextSort(largestFirst, 'amount', 'bank-debit')
-  assert.equal(smallestFirst.direction, 'asc')
-  assert.deepEqual(sortMovements(rows, smallestFirst).map((row) => row.id), [2, 3, 1])
-  const otherAmountColumn = nextSort(smallestFirst, 'amount', 'book-debit')
-  assert.equal(otherAmountColumn.direction, 'desc')
+  assert.equal(columnAmountCents(rows[0], 'bank-debit'), 2_000)
+  assert.equal(columnAmountCents(rows[2], 'book-debit'), 1_800)
+  const bankDebitDesc = nextSort(null, 'amount', 'bank-debit')
+  assert.equal(bankDebitDesc.direction, 'desc')
+  assert.deepEqual(sortMovements(rows, bankDebitDesc).map((row) => row.id), [1, 2, 3])
+  const bookDebitDesc = nextSort(null, 'amount', 'book-debit')
+  assert.deepEqual(sortMovements(rows, bookDebitDesc).map((row) => row.id), [3, 1, 2])
+  const debitDesc = nextSort(null, 'debit', 'debit')
+  assert.equal(debitDesc.direction, 'desc')
+  assert.deepEqual(sortMovements(rows, debitDesc).map((row) => row.id), [1, 3, 2])
+  const creditDesc = nextSort(null, 'credit', 'credit')
+  assert.deepEqual(sortMovements(rows, creditDesc).map((row) => row.id), [2, 1, 3])
+})
+
+test('text columns sort alphabetically and reference helpers match display', () => {
+  const rows = [
+    movement({ id: 1, origin: 'LIBRO', sector: '211112011001', ref2: '999', receipt: 'DA' }),
+    movement({ id: 2, origin: 'BANCO', dealer: '1337', ref1: '10721870/1', ref2: '10721870', receipt: 'AB' }),
+    movement({ id: 3, origin: 'BANCO', dealer: '3550', receipt: 'H' }),
+  ]
+  assert.equal(referenceOne(rows[2]), 'H')
+  assert.deepEqual(sortMovements(rows, nextSort(null, 'sector', 'sector')).map((row) => row.id), [2, 3, 1])
+  assert.deepEqual(sortMovements(rows, nextSort(null, 'reference2', 'reference2')).map((row) => row.id), [3, 2, 1])
+  assert.deepEqual(sortMovements(rows, nextSort(null, 'terminal', 'terminal')).map((row) => row.id), [1, 2, 3])
 })
 
 test('date sort starts oldest first and concept sort starts A to Z', () => {

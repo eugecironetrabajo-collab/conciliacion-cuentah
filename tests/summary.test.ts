@@ -45,3 +45,50 @@ test('balances stay split and receipt or amount filters match partial values', a
   assert.equal(repeated[0]?.inserted, 0)
   assert.equal(db.getMovements([stored.id])[0]?.processDate, stored.processDate)
 })
+
+test('status summary can filter pending balances by dealer code', async () => {
+  process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'cuenta-h-')), 'conciliacion.db')
+  const db = await import('../src/db.js')
+  const beforeAll = db.statusSummary().statement
+  const before1337 = db.statusSummary({ dealer: '1337' }).statement
+  const before3550 = db.statusSummary({ dealer: '3550' }).statement
+
+  db.importBatches([
+    { name: 'b1337.txt', rows: [{ origin: 'BANCO' as const, date: '2026-09-02', debitCents: 100, dealer: '1337', orderNo: '9001337', receipt: 'ST', notes: 'Banco 1337', fingerprint: 'saldo-1337' }] },
+    { name: 'b3550.txt', rows: [{ origin: 'BANCO' as const, date: '2026-09-02', debitCents: 250, dealer: '3550', orderNo: '9003550', receipt: 'ST', notes: 'Banco 3550', fingerprint: 'saldo-3550' }] },
+    { name: 'l.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-02', creditCents: 40, dealer: '1337,3550', sector: '211112002001', notes: 'Libro compartido', fingerprint: 'saldo-compartido' }] },
+  ])
+
+  const all = db.statusSummary().statement
+  const only1337 = db.statusSummary({ dealer: '1337' }).statement
+  const only3550 = db.statusSummary({ dealer: '3550' }).statement
+
+  assert.equal(all.bankDebits - beforeAll.bankDebits, 350)
+  assert.equal(all.bookCredits - beforeAll.bookCredits, 40)
+  assert.equal(only1337.bankDebits - before1337.bankDebits, 100)
+  assert.equal(only1337.bookCredits - before1337.bookCredits, 40)
+  assert.equal(only3550.bankDebits - before3550.bankDebits, 250)
+  assert.equal(only3550.bookCredits - before3550.bookCredits, 40)
+})
+
+test('reconciled movements do not affect pending balances', async () => {
+  process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'cuenta-h-')), 'conciliacion.db')
+  const db = await import('../src/db.js')
+  const before = db.statusSummary().statement
+  db.importBatches([
+    { name: 'b.txt', rows: [{ origin: 'BANCO' as const, date: '2026-09-01', debitCents: 100, dealer: '1337', orderNo: '9000100', receipt: 'ST', notes: 'Banco saldo', fingerprint: 'saldo-banco' }] },
+    { name: 'l.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-01', creditCents: 100, sector: '211112001001', notes: 'Libro saldo', fingerprint: 'saldo-libro' }] },
+  ])
+  const pending = db.listMovements({ status: 'PENDIENTE' })
+  const bank = pending.find((row) => row.notes === 'Banco saldo')
+  const book = pending.find((row) => row.notes === 'Libro saldo')
+  if (!bank || !book) throw new Error('No se cargaron las partidas de saldo')
+  const afterImport = db.statusSummary().statement
+  assert.equal(afterImport.bankDebits - before.bankDebits, 100)
+  assert.equal(afterImport.bookCredits - before.bookCredits, 100)
+
+  db.confirmReconciliation([bank.id, book.id], undefined)
+  const afterReconcile = db.statusSummary().statement
+  assert.equal(afterReconcile.bankDebits, before.bankDebits)
+  assert.equal(afterReconcile.bookCredits, before.bookCredits)
+})

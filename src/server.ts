@@ -9,12 +9,16 @@ import {
   purgeMovements,
   getReconciliation,
   importBatches,
+  importTerminalSummaryBatches,
   listMovements,
   restoreMovements,
   reverseReconciliation,
+  reverseReconciliationPartial,
   statusSummary,
   unreconcile,
+  updateMovementAssignee,
 } from './db.js'
+import { normalizeAssignee } from './assignees.js'
 import { parseBankFile, parseBookFile } from './importers.js'
 import { automaticProposal, candidateFor, findCandidates } from './reconcile.js'
 
@@ -31,7 +35,7 @@ const queryCents = (value: unknown) => {
 }
 
 app.get('/api/health', (_req, res) => res.json(ok({ status: 'up' })))
-app.get('/api/status', (_req, res) => res.json(ok(statusSummary())))
+app.get('/api/status', (req, res) => res.json(ok(statusSummary({ dealer: queryString(req.query.dealer) }))))
 app.get('/api/movimientos', (req, res) => {
   res.json(ok(listMovements({
     status: queryString(req.query.estado),
@@ -54,7 +58,7 @@ app.get('/api/movimientos', (req, res) => {
 app.get('/api/sugerencias', (req, res) => {
   const id = Number(req.query.id)
   const rows = listMovements({ status: 'PENDIENTE' })
-  const candidates = findCandidates(rows).filter((candidate) => candidate.bankId === id || candidate.bookId === id)
+  const candidates = findCandidates(rows).filter((candidate) => candidate.movementIds.includes(id))
   res.json(ok(candidates))
 })
 app.post('/api/reconcile/preview', (_req, res) => {
@@ -62,11 +66,11 @@ app.post('/api/reconcile/preview', (_req, res) => {
 })
 app.post('/api/reconcile/check', (req, res) => {
   const rows = listMovements({ status: 'PENDIENTE' })
-  const bank = rows.find((row) => row.id === Number(req.body.bankId))
-  const book = rows.find((row) => row.id === Number(req.body.bookId))
-  if (!bank || !book) return res.status(404).json({ ok: false, error: 'Partida no encontrada' })
+  const left = rows.find((row) => row.id === Number(req.body.leftId ?? req.body.bankId))
+  const right = rows.find((row) => row.id === Number(req.body.rightId ?? req.body.bookId))
+  if (!left || !right) return res.status(404).json({ ok: false, error: 'Partida no encontrada' })
   try {
-    res.json(ok(candidateFor(bank, book)))
+    res.json(ok(candidateFor(left, right)))
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
   }
@@ -77,9 +81,11 @@ app.post('/api/reconcile', (req, res) => {
       ? req.body.movementIds.map(Number)
       : []
     if (!movementIds.length && Array.isArray(req.body.pairs)) {
-      movementIds = req.body.pairs.flatMap((pair: { bankId: unknown; bookId: unknown }) => [
-        Number(pair.bankId), Number(pair.bookId),
-      ])
+      movementIds = req.body.pairs.flatMap((pair: { movementIds?: unknown[]; bankId?: unknown; bookId?: unknown }) =>
+        Array.isArray(pair.movementIds)
+          ? pair.movementIds.map(Number)
+          : [Number(pair.bankId), Number(pair.bookId)],
+      )
     }
     if (!movementIds.length) throw new Error('No hay partidas preparadas para confirmar')
     const result = confirmReconciliation(
@@ -104,10 +110,27 @@ app.post('/api/reconciliaciones/:id/revertir', (req, res) => {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
   }
 })
+app.post('/api/reconciliaciones/:id/revertir-parcial', (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.movementIds) ? req.body.movementIds.map(Number) : []
+    res.json(ok(reverseReconciliationPartial(Number(req.params.id), ids, String(req.body.motivo ?? ''))))
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+})
 app.post('/api/unreconcile', (req, res) => {
   try {
     unreconcile(Number(req.body.id), String(req.body.motivo ?? 'Sin motivo'))
     res.json(ok({ restored: true }))
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
+  }
+})
+
+app.patch('/api/movimientos/:id/assignee', (req, res) => {
+  try {
+    const movement = updateMovementAssignee(Number(req.params.id), normalizeAssignee(req.body.assignee))
+    res.json(ok(movement))
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) })
   }
@@ -148,11 +171,18 @@ app.post('/api/import/:origin', upload.any(), (req, res) => {
       const result = origin === 'BANCO' ? parseBankFile(file.buffer, file.originalname) : parseBookFile(file.buffer, file.originalname)
       return { name: file.originalname, ...result }
     })
-    const stored = importBatches(parsed.map((file) => ({ name: file.name, rows: file.rows })))
+    const stored = parsed.map((file) => (
+      file.format === 'terminal-summary'
+        ? importTerminalSummaryBatches([{ name: file.name, rows: file.rows }])[0]
+        : importBatches([{ name: file.name, rows: file.rows }])[0]
+    ))
     const filesResult = parsed.map((file, index) => ({
       name: file.name,
       inserted: stored[index].inserted,
       duplicates: file.duplicatesInFile + stored[index].duplicates,
+      updatedDealers: stored[index].updatedDealers,
+      skippedExisting: stored[index].skippedExisting ?? 0,
+      cleanedDuplicates: stored[index].cleanedDuplicates ?? 0,
       skipped: file.skipped,
       errors: file.errors,
       total: file.rows.length + file.duplicatesInFile,
@@ -163,6 +193,9 @@ app.post('/api/import/:origin', upload.any(), (req, res) => {
       files: filesResult,
       inserted: filesResult.reduce((sum, file) => sum + file.inserted, 0),
       duplicates: filesResult.reduce((sum, file) => sum + file.duplicates, 0),
+      updatedDealers: filesResult.reduce((sum, file) => sum + file.updatedDealers, 0),
+      skippedExisting: filesResult.reduce((sum, file) => sum + file.skippedExisting, 0),
+      cleanedDuplicates: filesResult.reduce((sum, file) => sum + file.cleanedDuplicates, 0),
       skipped: filesResult.reduce((sum, file) => sum + file.skipped, 0),
       errors: filesResult.flatMap((file) => file.errors.map((error) => `${file.name}: ${error}`)),
     }))
@@ -179,10 +212,10 @@ app.get('/api/report', (req, res) => {
     from: queryString(req.query.desde),
     to: queryString(req.query.hasta),
   })
-  const headers = ['Fecha', 'Origen', 'Estado', 'Comprobante', 'Orden', 'Ref. 1', 'Ref. 2', 'Débito', 'Crédito', 'Observaciones']
+  const headers = ['Fecha', 'Origen', 'Estado', 'Comprobante', 'Orden', 'Ref. 1', 'Ref. 2', 'Débito', 'Crédito', 'Observaciones', 'Responsable']
   const csvRows = rows.map((row) => [
     row.date, row.origin, row.status, row.receipt, row.orderNo, row.ref1, row.ref2,
-    (row.debitCents / 100).toFixed(2), (row.creditCents / 100).toFixed(2), row.notes,
+    (row.debitCents / 100).toFixed(2), (row.creditCents / 100).toFixed(2), row.notes, row.assignee,
   ].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(';'))
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', 'attachment; filename="conciliacion.csv"')
@@ -192,7 +225,7 @@ app.get('/api/report', (req, res) => {
 const dist = resolve('dist')
 if (process.env.NODE_ENV === 'production' && existsSync(dist)) {
   app.use(express.static(dist))
-  app.get('*', (_req, res) => res.sendFile(resolve(dist, 'index.html')))
+  app.get('/{*splat}', (_req, res) => res.sendFile(resolve(dist, 'index.html')))
 }
 
 const port = Number(process.env.PORT ?? 43128)

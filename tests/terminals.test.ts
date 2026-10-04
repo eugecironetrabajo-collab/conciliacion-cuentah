@@ -87,4 +87,80 @@ test('combined statuses and permanent deletion keep reconciled movements', async
   db.db.prepare(`UPDATE movements SET status = 'ELIMINADO' WHERE id = ?`).run(active.id)
   assert.throws(() => db.purgeMovements([active.id]), /conciliación activa/)
   assert.equal(db.getReconciliation(activeGroup.reconciliationId)?.status, 'ACTIVA')
+
+  db.importBatches([{
+    name: 'partial-bank.txt',
+    rows: [
+      { origin: 'BANCO' as const, date: '2026-09-04', debitCents: 100, dealer: '1337', notes: 'Parcial banco 1', fingerprint: 'banco-partial-1' },
+      { origin: 'BANCO' as const, date: '2026-09-04', debitCents: 50, dealer: '1337', notes: 'Parcial banco 2', fingerprint: 'banco-partial-2' },
+    ],
+  }])
+  db.importBatches([{
+    name: 'partial-book.xls',
+    rows: [
+      { origin: 'LIBRO' as const, date: '2026-09-04', creditCents: 100, dealer: '6', notes: 'Parcial libro 1', fingerprint: 'libro-partial-1' },
+      { origin: 'LIBRO' as const, date: '2026-09-04', creditCents: 50, dealer: '6', notes: 'Parcial libro 2', fingerprint: 'libro-partial-2' },
+    ],
+  }])
+  const partialRows = db.listMovements({ status: 'PENDIENTE' })
+  const partialGroup = db.confirmReconciliation([
+    partialRows.find((row) => row.notes === 'Parcial banco 1')!.id,
+    partialRows.find((row) => row.notes === 'Parcial banco 2')!.id,
+    partialRows.find((row) => row.notes === 'Parcial libro 1')!.id,
+    partialRows.find((row) => row.notes === 'Parcial libro 2')!.id,
+  ], undefined)
+  const partialBank = partialRows.find((row) => row.notes === 'Parcial banco 1')!
+  const partialBook = partialRows.find((row) => row.notes === 'Parcial libro 1')!
+  const partialResult = db.reverseReconciliationPartial(partialGroup.reconciliationId, [partialBank.id, partialBook.id], 'Corrección de dos líneas')
+  assert.equal('partial' in partialResult && partialResult.partial, true)
+  assert.equal(db.getMovements([partialBank.id])[0]?.status, 'PENDIENTE')
+  assert.equal(db.getMovements([partialBook.id])[0]?.status, 'PENDIENTE')
+  assert.equal(db.getReconciliation(partialGroup.reconciliationId)?.status, 'ACTIVA')
+  assert.equal(db.getReconciliation(partialGroup.reconciliationId)?.movements.length, 2)
+  const remaining = db.getReconciliation(partialGroup.reconciliationId)!.movements
+  assert.throws(
+    () => db.reverseReconciliationPartial(partialGroup.reconciliationId, [remaining[0]!.id], 'Selección desbalanceada'),
+    /desbalanceada/,
+  )
+})
+
+test('libro-only reconciliation and pending adjustments can be closed later', async () => {
+  process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'cuenta-h-')), 'conciliacion.db')
+  const db = await import('../src/db.js')
+  db.importBatches([
+    { name: 'b.txt', rows: [{ origin: 'BANCO' as const, date: '2026-09-05', debitCents: 100, dealer: '1337', orderNo: '999990001', receipt: 'DA', notes: 'Banco ajuste', fingerprint: 'banco-ajuste' }] },
+    { name: 'l1.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-05', creditCents: 60, sector: '211112001001', notes: 'Libro parcial', fingerprint: 'libro-parcial-ajuste' }] },
+  ])
+  const pending = db.listMovements({ status: 'PENDIENTE' })
+  const bank = pending.find((row) => row.notes === 'Banco ajuste')
+  const book = pending.find((row) => row.notes === 'Libro parcial')
+  if (!bank || !book) throw new Error('No se cargaron las partidas de ajuste')
+  const withAdjustment = db.confirmReconciliation([bank.id, book.id], { reason: 'Diferencia de prueba' })
+  const adjustment = db.getMovements([withAdjustment.adjustmentId!])[0]
+  assert.equal(adjustment?.status, 'PENDIENTE')
+  assert.equal(adjustment?.isAdjustment, true)
+
+  db.importBatches([{
+    name: 'l2.xls',
+    rows: [{ origin: 'LIBRO' as const, date: '2026-09-06', debitCents: 40, sector: '211112001001', notes: 'Libro cierre', fingerprint: 'libro-cierre-ajuste' }],
+  }])
+  const imported = db.listMovements({ status: 'PENDIENTE' }).find((row) => row.notes === 'Libro cierre')
+  if (!imported || !adjustment) throw new Error('No se cargó la partida de cierre')
+  const closed = db.confirmReconciliation([adjustment.id, imported.id], undefined)
+  assert.equal(db.getMovements([adjustment.id])[0]?.status, 'CONCILIADO')
+  assert.equal(db.getMovements([imported.id])[0]?.status, 'CONCILIADO')
+  db.reverseReconciliation(closed.reconciliationId, 'Reabrir ajuste')
+  assert.equal(db.getMovements([adjustment.id])[0]?.status, 'PENDIENTE')
+  assert.equal(db.getMovements([imported.id])[0]?.status, 'PENDIENTE')
+
+  const credit = db.importBatches([{ name: 'l3.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-07', creditCents: 25, sector: '211112001001', notes: 'Credito mal', fingerprint: 'libro-mal' }] }])
+  const debit = db.importBatches([{ name: 'l4.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-07', debitCents: 25, sector: '211112001001', notes: 'Debito anula', fingerprint: 'libro-anula' }] }])
+  assert.equal(credit[0]?.inserted, 1)
+  assert.equal(debit[0]?.inserted, 1)
+  const libroRows = db.listMovements({ status: 'PENDIENTE' })
+  const creditRow = libroRows.find((row) => row.notes === 'Credito mal')
+  const debitRow = libroRows.find((row) => row.notes === 'Debito anula')
+  if (!creditRow || !debitRow) throw new Error('No se cargaron las partidas de libro')
+  const libroOnly = db.confirmReconciliation([creditRow.id, debitRow.id], undefined)
+  assert.ok(libroOnly.reconciliationId)
 })
