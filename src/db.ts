@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { getAuditActor } from './auth.js'
 import type { AdjustmentInput, ImportRow, Movement, Origin, ReconciliationRecord } from './types.js'
 import { balanceSummary } from './reconcile.js'
 import { bankBusinessKey, type BankMatchFields } from './importers.js'
@@ -84,6 +85,16 @@ if (!movementColumns.some((column) => column.name === 'is_adjustment')) {
 }
 if (!movementColumns.some((column) => column.name === 'assignee')) {
   db.exec("ALTER TABLE movements ADD COLUMN assignee TEXT NOT NULL DEFAULT ''")
+}
+
+const auditColumns = db.prepare('PRAGMA table_info(audit)').all() as Array<{ name: string }>
+if (!auditColumns.some((column) => column.name === 'actor')) {
+  db.exec("ALTER TABLE audit ADD COLUMN actor TEXT NOT NULL DEFAULT 'sistema'")
+}
+
+const recordAudit = (action: string, detail: string) => {
+  db.prepare('INSERT INTO audit (action, detail, actor) VALUES (?, ?, ?)')
+    .run(action, detail, getAuditActor())
 }
 
 const legacyPairs = db.prepare(`
@@ -304,8 +315,7 @@ export function updateMovementAssignee(id: number, assignee: string) {
   if (row.status !== 'PENDIENTE') throw new Error('Solo se puede asignar responsable a partidas pendientes')
   const value = assignee.trim().slice(0, 80)
   db.prepare('UPDATE movements SET assignee = ? WHERE id = ?').run(value, id)
-  db.prepare("INSERT INTO audit (action, detail) VALUES ('ASIGNAR_RESPONSABLE', ?)")
-    .run(`Partida ${id}: ${value || 'sin responsable'}`)
+  recordAudit('ASIGNAR_RESPONSABLE', `Partida ${id}: ${value || 'sin responsable'}`)
   return getMovements([id])[0]
 }
 
@@ -334,10 +344,7 @@ export function purgeMovements(ids: number[]) {
     const placeholders = removableIds.map(() => '?').join(',')
     db.prepare(`DELETE FROM reconciliation_items WHERE movement_id IN (${placeholders})`).run(...removableIds)
     db.prepare(`DELETE FROM movements WHERE id IN (${placeholders})`).run(...removableIds)
-    db.prepare('INSERT INTO audit (action, detail) VALUES (?, ?)').run(
-      'BORRAR',
-      `${removableIds.length} movimiento(s) eliminados definitivamente`,
-    )
+    recordAudit('BORRAR', `${removableIds.length} movimiento(s) eliminados definitivamente`)
   })()
   return { deleted: removableIds.length, rejected: rows.length - removableIds.length }
 }
@@ -355,7 +362,7 @@ function changeMovementStatus(ids: number[], status: 'PENDIENTE' | 'ELIMINADO', 
   db.transaction(() => {
     const placeholders = uniqueIds.map(() => '?').join(',')
     db.prepare(`UPDATE movements SET status = ? WHERE id IN (${placeholders})`).run(status, ...uniqueIds)
-    db.prepare('INSERT INTO audit (action, detail) VALUES (?, ?)').run(
+    recordAudit(
       status === 'ELIMINADO' ? 'ELIMINAR' : 'RESTAURAR',
       `${uniqueIds.length} movimiento(s): ${reason.trim()}`,
     )
@@ -508,8 +515,10 @@ export function confirmReconciliation(
         DELETE FROM reconciliation_items
         WHERE reconciliation_id = ? AND movement_id = ? AND is_adjustment = 1
       `).run(parentReconciliationId, adjustmentRow.id)
-      db.prepare("INSERT INTO audit (action, detail) VALUES ('CONCILIAR_AJUSTE', ?)")
-        .run(`Conciliación ${reconciliationId}: ajuste ${adjustmentRow.id} cerrado con partida ${bookRow.id} desde ${parentReconciliationId}`)
+      recordAudit(
+        'CONCILIAR_AJUSTE',
+        `Conciliación ${reconciliationId}: ajuste ${adjustmentRow.id} cerrado con partida ${bookRow.id} desde ${parentReconciliationId}`,
+      )
       return { reconciliationId, movementCount: rows.length, adjustmentId: adjustmentRow.id, differenceCents: 0 }
     }
 
@@ -564,8 +573,10 @@ export function confirmReconciliation(
       adjustmentId = Number(adjustmentResult.lastInsertRowid)
       itemStatement.run(reconciliationId, adjustmentId, 1)
     }
-    db.prepare("INSERT INTO audit (action, detail) VALUES ('CONCILIAR', ?)")
-      .run(`Conciliación ${reconciliationId}: ${rows.length} partidas${adjustmentId ? `, ajuste ${adjustmentId}` : ''}`)
+    recordAudit(
+      'CONCILIAR',
+      `Conciliación ${reconciliationId}: ${rows.length} partidas${adjustmentId ? `, ajuste ${adjustmentId}` : ''}`,
+    )
     return { reconciliationId, movementCount: rows.length, adjustmentId, differenceCents: difference }
   })()
 }
@@ -622,8 +633,10 @@ export function reverseReconciliation(id: number, reason: string) {
         SET status = 'REVERTIDA', reversed_at = CURRENT_TIMESTAMP, reversal_reason = ?
         WHERE id = ?
       `).run(reason.trim(), id)
-      db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)")
-        .run(`Conciliación ${id}: ajuste ${adjustment.id} reabierto en ${parentReconciliationId}. ${reason.trim()}`)
+      recordAudit(
+        'DESCONCILIAR',
+        `Conciliación ${id}: ajuste ${adjustment.id} reabierto en ${parentReconciliationId}. ${reason.trim()}`,
+      )
       return { reconciliationId: id, restored: 2 }
     }
 
@@ -646,8 +659,7 @@ export function reverseReconciliation(id: number, reason: string) {
       SET status = 'REVERTIDA', reversed_at = CURRENT_TIMESTAMP, reversal_reason = ?
       WHERE id = ?
     `).run(reason.trim(), id)
-    db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)")
-      .run(`Conciliación ${id}: ${reason.trim()}`)
+    recordAudit('DESCONCILIAR', `Conciliación ${id}: ${reason.trim()}`)
     return { reconciliationId: id, restored: reconciliation.movements.filter((row) => !row.isAdjustment).length }
   })()
 }
@@ -680,8 +692,7 @@ export function reverseReconciliationPartial(id: number, movementIds: number[], 
       DELETE FROM reconciliation_items
       WHERE reconciliation_id = ? AND movement_id IN (${placeholders}) AND is_adjustment = 0
     `).run(id, ...selectedIds)
-    db.prepare("INSERT INTO audit (action, detail) VALUES ('DESCONCILIAR', ?)")
-      .run(`Conciliación ${id}: reversión parcial de ${selectedIds.length} partidas. ${reason.trim()}`)
+    recordAudit('DESCONCILIAR', `Conciliación ${id}: reversión parcial de ${selectedIds.length} partidas. ${reason.trim()}`)
     return { reconciliationId: id, restored: selectedIds.length, partial: true }
   })()
 }

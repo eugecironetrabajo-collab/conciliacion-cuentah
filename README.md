@@ -74,6 +74,38 @@ Desde **Reportes** puede descargar un CSV de movimientos filtrados por estado, o
 | Arrastrar borde de columna | Cambiar ancho (Conciliar) |
 | Doble clic en borde de columna | Autofit al contenido (Conciliar) |
 
+## Despliegue
+
+MEC está pensado para **una instalación por cliente**: cada empresa tiene su propia URL, base SQLite y administrador.
+
+### Requisitos
+
+- Node.js 22 o Docker
+- VPS con acceso SSH (para despliegue en la nube)
+- Variables de entorno definidas en `.env` (copie desde `.env.example`)
+
+### Variables principales
+
+| Variable | Uso |
+|---|---|
+| `PORT` | Puerto HTTP (predeterminado `43128` en producción) |
+| `DB_PATH` | Ruta de la base SQLite |
+| `NODE_ENV` | `production` activa login y sirve el frontend compilado |
+| `ADMIN_USER` / `ADMIN_PASSWORD` | Credenciales del administrador de la instalación |
+| `SESSION_SECRET` | Secreto para firmar cookies de sesión (obligatorio en producción) |
+
+En producción (`NODE_ENV=production`) el login es obligatorio. En desarrollo local la API permanece abierta salvo que defina `AUTH_REQUIRED=true`.
+
+### Docker
+
+```bash
+cp .env.example .env
+# Editar ADMIN_PASSWORD y SESSION_SECRET
+docker compose up -d --build
+```
+
+La base queda en `./data/conciliacion.db`. Guía completa de VPS, Nginx, HTTPS y backups: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
 ## Desarrollo
 
 Requiere Node.js 22 o posterior.

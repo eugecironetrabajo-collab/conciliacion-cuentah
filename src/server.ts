@@ -3,6 +3,14 @@ import multer from 'multer'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
+  authMiddleware,
+  authRequired,
+  clearSessionCookie,
+  createSessionCookie,
+  currentUser,
+  verifyLogin,
+} from './auth.js'
+import {
   auditRows,
   confirmReconciliation,
   deleteMovements,
@@ -27,6 +35,29 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 app.use(express.json({ limit: '2mb' }))
 
 const ok = (data: unknown) => ({ ok: true, data })
+
+app.get('/api/health', (_req, res) => res.json(ok({ status: 'up', auth: authRequired() })))
+app.get('/api/session', (req, res) => {
+  if (!authRequired()) return res.json(ok({ user: 'local', auth: false }))
+  const user = currentUser(req)
+  if (!user) return res.status(401).json({ ok: false, error: 'Sesión no válida' })
+  return res.json(ok({ user, auth: true }))
+})
+app.post('/api/login', (req, res) => {
+  if (!authRequired()) return res.json(ok({ user: 'local', auth: false }))
+  const username = String(req.body.username ?? '')
+  const password = String(req.body.password ?? '')
+  const user = verifyLogin(username, password)
+  if (!user) return res.status(401).json({ ok: false, error: 'Usuario o contraseña incorrectos' })
+  res.setHeader('Set-Cookie', createSessionCookie(user))
+  return res.json(ok({ user, auth: true }))
+})
+app.post('/api/logout', (_req, res) => {
+  res.setHeader('Set-Cookie', clearSessionCookie())
+  res.json(ok({ loggedOut: true }))
+})
+
+app.use(authMiddleware)
 const queryString = (value: unknown) => typeof value === 'string' ? value : undefined
 const queryCents = (value: unknown) => {
   if (typeof value !== 'string' || value.trim() === '') return undefined
@@ -34,7 +65,6 @@ const queryCents = (value: unknown) => {
   return Number.isFinite(number) ? Math.round(number * 100) : undefined
 }
 
-app.get('/api/health', (_req, res) => res.json(ok({ status: 'up' })))
 app.get('/api/status', (req, res) => res.json(ok(statusSummary({ dealer: queryString(req.query.dealer) }))))
 app.get('/api/movimientos', (req, res) => {
   res.json(ok(listMovements({

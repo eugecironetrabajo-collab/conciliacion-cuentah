@@ -2,7 +2,7 @@ import './style.css'
 import { ASSIGNEE_OPTIONS } from '../../src/assignees.js'
 import { columnAmountCents, matchesConcept, nextSort, referenceOne, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
 import { TERMINALS, movementLabel } from '../../src/terminals.js'
-import { api, escapeHtml as esc, getMovements, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
+import { api, escapeHtml as esc, getMovements, getSession, login, logout, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
 import { setupColumnResize, setupQuadrantSplitter } from './resize.js'
 
 const isFormField = (target: EventTarget | null) => {
@@ -24,23 +24,76 @@ const routes: Array<{ id: Route; label: string; icon: string }> = [
 ]
 
 const app = document.querySelector<HTMLDivElement>('#app')!
+let sessionUser = 'local'
+
+const initials = (name: string) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('') || 'ME'
+
+function updateSessionUser() {
+  const label = document.querySelector<HTMLElement>('#session-user-name')
+  const subtitle = document.querySelector<HTMLElement>('#session-user-subtitle')
+  const avatar = document.querySelector<HTMLElement>('#session-avatar')
+  if (label) label.textContent = sessionUser
+  if (subtitle) subtitle.textContent = sessionUser === 'local' ? 'Usuario local' : 'Sesión activa'
+  if (avatar) avatar.textContent = initials(sessionUser)
+}
+
+function renderLogin(error = '') {
+  app.innerHTML = `
+    <section class="login-screen">
+      <div class="login-card panel">
+        <div class="login-brand"><span class="brand-mark">M</span><div><b>MEC</b><small>Método Externo de Conciliación</small></div></div>
+        <h1>Iniciar sesión</h1>
+        <p>Ingrese sus credenciales para acceder a la instalación.</p>
+        ${error ? `<div class="login-error">${esc(error)}</div>` : ''}
+        <form id="login-form" class="login-form">
+          <label>Usuario<input name="username" autocomplete="username" required></label>
+          <label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label>
+          <button class="button primary" type="submit">Ingresar <span>→</span></button>
+        </form>
+      </div>
+    </section>`
+  document.querySelector<HTMLFormElement>('#login-form')!.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const form = new FormData(event.target as HTMLFormElement)
+    try {
+      const session = await login(String(form.get('username') ?? ''), String(form.get('password') ?? ''))
+      sessionUser = session.user
+      shell()
+      updateSessionUser()
+      if (!location.hash) location.hash = '#/resumen'
+      await render()
+    } catch (loginError) {
+      renderLogin(loginError instanceof Error ? loginError.message : 'No se pudo iniciar sesión')
+    }
+  })
+}
 
 function shell() {
   app.innerHTML = `
     <header class="app-header">
       <div class="header-main">
-        <a class="brand" href="#/resumen" aria-label="SYC Conciliaciones">
-          <span class="brand-mark">S</span>
-          <span><b>SYC</b><small>Conciliaciones Cuenta H</small></span>
+        <a class="brand" href="#/resumen" aria-label="MEC — Método Externo de Conciliación">
+          <span class="brand-mark">M</span>
+          <span><b>MEC</b><small>Método Externo de Conciliación</small></span>
         </a>
         <div class="company-switcher">
           <span>Empresa activa</span>
-          <button type="button"><b>Peugeot Citroën Argentina S.A.</b><small>Cuenta H · ARS</small><i>⌄</i></button>
+          <button type="button" class="company-switcher-button">
+            <span class="company-switcher-copy">
+              <b>Peugeot Citroën Argentina S.A.</b>
+              <small>Cuenta H · ARS</small>
+            </span>
+            <span class="menu-chevron" aria-hidden="true"></span>
+          </button>
         </div>
         <div class="top-actions">
           <span class="live"><i></i>Sistema operativo</span>
           <span class="database-pill"><small>Base activa</small><b id="db-badge">conciliacion.db</b></span>
-          <button class="user-menu"><span class="avatar">AP</span><span><b>Administración</b><small>Usuario local</small></span><i>⌄</i></button>
+          <button class="user-menu" id="logout-button" type="button" title="Cerrar sesión">
+            <span class="avatar" id="session-avatar">${esc(initials(sessionUser))}</span>
+            <span class="user-menu-copy"><b id="session-user-name">${esc(sessionUser)}</b><small id="session-user-subtitle">Sesión activa</small></span>
+            <span class="menu-chevron" aria-hidden="true"></span>
+          </button>
         </div>
       </div>
       <div class="nav-bar">
@@ -49,7 +102,7 @@ function shell() {
           <a href="#/${route.id}" data-nav="${route.id}">
             <span class="nav-icon">${route.icon}</span>${route.label}
           </a>`).join('')}</nav>
-        <span class="nav-context">SYC / Cuenta H</span>
+        <span class="nav-context">MEC / CUENTA H</span>
       </div>
     </header>
     <main>
@@ -59,6 +112,15 @@ function shell() {
   `
   document.querySelector('#menu-button')?.addEventListener('click', () => document.body.classList.toggle('menu-open'))
   document.querySelectorAll('#nav a').forEach((link) => link.addEventListener('click', () => document.body.classList.remove('menu-open')))
+  document.querySelector('#logout-button')?.addEventListener('click', async () => {
+    try {
+      await logout()
+    } catch {
+      // ignore logout errors and return to login
+    }
+    sessionUser = 'local'
+    renderLogin()
+  })
 }
 
 function route(): Route {
@@ -968,16 +1030,28 @@ function renderReports(root: HTMLElement) {
 }
 
 async function renderAudit(root: HTMLElement) {
-  const rows = await api<Array<{ id: number; action: string; detail: string; created_at: string }>>('/api/auditoria')
+  const rows = await api<Array<{ id: number; action: string; detail: string; actor?: string; created_at: string }>>('/api/auditoria')
   root.innerHTML = `
     ${heading('Trazabilidad', 'Auditoría', 'Registro inalterable de acciones de conciliación.')}
     <section class="panel table-panel"><div class="panel-head"><div><h2>Historial de actividad</h2><p>Últimos 100 eventos</p></div></div>
     ${rows.length ? `<div class="audit-list">${rows.map((row) => `<div class="audit-row">
-      <span class="audit-icon">✓</span><div><b>${esc(row.action)}</b><p>${esc(row.detail)}</p></div><time>${new Date(`${row.created_at}Z`).toLocaleString('es-AR')}</time>
+      <span class="audit-icon">✓</span><div><b>${esc(row.action)}</b><p>${esc(row.detail)}${row.actor ? ` · ${esc(row.actor)}` : ''}</p></div><time>${new Date(`${row.created_at}Z`).toLocaleString('es-AR')}</time>
     </div>`).join('')}</div>` : empty('Sin actividad registrada', 'Las conciliaciones confirmadas aparecerán aquí.')}</section>`
 }
 
-shell()
-window.addEventListener('hashchange', render)
-if (!location.hash) location.hash = '#/resumen'
-render()
+async function bootstrap() {
+  try {
+    const session = await getSession()
+    sessionUser = session.user
+    shell()
+    updateSessionUser()
+    window.addEventListener('hashchange', () => { void render() })
+    window.addEventListener('mec:unauthorized', () => renderLogin())
+    if (!location.hash) location.hash = '#/resumen'
+    await render()
+  } catch {
+    renderLogin()
+  }
+}
+
+void bootstrap()
