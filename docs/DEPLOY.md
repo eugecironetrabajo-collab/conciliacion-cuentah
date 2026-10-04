@@ -132,3 +132,12 @@ docker compose logs -f mec
 docker compose restart mec
 docker compose down
 ```
+
+## Scripts de respaldo seguro (desarrollo local)
+
+Estos scripts no modifican `main`, no usan `--force` y no tocan la base local:
+
+```bash
+./deploy/push-cursor.sh              # sube la rama actual a origin (Cursor)
+./deploy/setup-github-remote.sh URL  # agrega remoto github sin reemplazar origin
+```
