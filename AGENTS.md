@@ -8,6 +8,13 @@ introducirse una interfaz de comandos paralela sin un requerimiento explícito.
 
 La documentación funcional para usuarios está en [`README.md`](README.md).
 
+## Aislamiento entre empresas
+
+- Modelo **una instalación por cliente**: URL, `.env`, volumen `data/` y dominio propios.
+- No es multi-tenant: no filtrar por `company_id` ni compartir una instalación entre empresas.
+- Los archivos importados se procesan en memoria; la persistencia es SQLite (`DB_PATH`).
+- Multi-usuario dentro de la misma empresa está planificado en [`docs/ROADMAP.md`](docs/ROADMAP.md); no implementar multi-tenant global sin requerimiento explícito.
+
 ## Arquitectura actual
 
 - Backend: Express + TypeScript en [`src/server.ts`](src/server.ts).

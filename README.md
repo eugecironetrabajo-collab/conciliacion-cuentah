@@ -74,6 +74,14 @@ Desde **Reportes** puede descargar un CSV de movimientos filtrados por estado, o
 | Arrastrar borde de columna | Cambiar ancho (Conciliar) |
 | Doble clic en borde de columna | Autofit al contenido (Conciliar) |
 
+## Privacidad de datos
+
+- **GitHub solo aloja código.** Los movimientos importados y conciliaciones **no** se suben al repositorio.
+- Los archivos bancarios y de Quiter se procesan al importar; **no se guardan** los originales en disco.
+- Los datos persistentes viven en `data/conciliacion.db` de **cada servidor**.
+- **Cada empresa debe tener su propia instalación** (URL, `.env`, volumen `data/` y dominio propios). No comparta una misma URL entre empresas distintas: en el modelo actual todos los usuarios de una instalación ven los mismos datos.
+- Varios miembros de la **misma** empresa pueden trabajar sobre los mismos datos compartiendo la instalación; hoy hay un solo usuario administrador por instalación (multi-usuario planificado: [`docs/ROADMAP.md`](docs/ROADMAP.md)).
+
 ## Despliegue
 
 MEC está pensado para **una instalación por cliente**: cada empresa tiene su propia URL, base SQLite y administrador.
@@ -104,7 +112,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-La base queda en `./data/conciliacion.db`. Guía completa de VPS, Nginx, HTTPS y backups: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+La base queda en `./data/conciliacion.db`. Guía completa de VPS, Nginx, HTTPS, backups y checklist por cliente: [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Desarrollo
 

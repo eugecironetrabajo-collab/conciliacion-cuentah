@@ -37,6 +37,15 @@ function updateSessionUser() {
   if (avatar) avatar.textContent = initials(sessionUser)
 }
 
+let shellListenersAttached = false
+
+function attachShellListeners() {
+  if (shellListenersAttached) return
+  shellListenersAttached = true
+  window.addEventListener('hashchange', () => { void render() })
+  window.addEventListener('mec:unauthorized', () => renderLogin())
+}
+
 function renderLogin(error = '') {
   app.innerHTML = `
     <section class="login-screen">
@@ -59,6 +68,7 @@ function renderLogin(error = '') {
       const session = await login(String(form.get('username') ?? ''), String(form.get('password') ?? ''))
       sessionUser = session.user
       shell()
+      attachShellListeners()
       updateSessionUser()
       if (!location.hash) location.hash = '#/resumen'
       await render()
@@ -1044,9 +1054,8 @@ async function bootstrap() {
     const session = await getSession()
     sessionUser = session.user
     shell()
+    attachShellListeners()
     updateSessionUser()
-    window.addEventListener('hashchange', () => { void render() })
-    window.addEventListener('mec:unauthorized', () => renderLogin())
     if (!location.hash) location.hash = '#/resumen'
     await render()
   } catch {

@@ -2,6 +2,18 @@
 
 MEC sigue el modelo **una instalación por cliente**: cada empresa tiene su propia URL, base SQLite y administrador. No es multi-tenant.
 
+## Privacidad y aislamiento de datos
+
+| Pregunta | Respuesta |
+|---|---|
+| ¿El repositorio GitHub contiene movimientos importados? | **No.** Solo código fuente. |
+| ¿Se guardan los archivos `.txt` / `.xls` originales? | **No.** Se procesan en memoria al importar; los datos quedan en SQLite. |
+| ¿Dónde viven los datos de cada empresa? | En `data/conciliacion.db` de **su** servidor (volumen Docker o ruta `DB_PATH`). |
+| ¿Pueden dos empresas compartir la misma URL? | **No recomendado.** Una instalación compartida expone los mismos movimientos a todos los usuarios que entren. |
+| ¿Cómo se aísla cada empresa? | Instalación independiente: VPS o directorio propio, `.env` propio, volumen `data/` propio, dominio propio. |
+
+**Regla operativa:** nunca reutilizar el mismo `.env`, volumen `data/` ni base SQLite entre empresas distintas.
+
 ## Requisitos
 
 - VPS con Ubuntu 22.04 o posterior
@@ -24,8 +36,8 @@ Cierre sesión y vuelva a entrar para usar Docker sin `sudo`.
 ### 2. Clonar el repositorio
 
 ```bash
-git clone https://github.com/SU-ORGANIZACION/recon-h.git
-cd recon-h
+git clone https://github.com/eugecironetrabajo-collab/conciliacion-cuentah.git
+cd conciliacion-cuentah
 ```
 
 ### 3. Configurar variables de entorno
@@ -104,6 +116,67 @@ NODE_ENV=production npm start
 
 Use un proceso supervisor (`systemd`, `pm2`, etc.) y un reverse proxy Nginx igual que en el flujo Docker.
 
+## Servicio local (WSL / systemd)
+
+Para dejar MEC corriendo en segundo plano en tu PC sin ejecutar `npm run dev` cada vez:
+
+### 1. Preparar entorno
+
+```bash
+cp .env.example .env
+# Editar .env: NODE_ENV=production, ADMIN_PASSWORD, SESSION_SECRET
+npm run build
+```
+
+Genere `SESSION_SECRET` con:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+### 2. Instalar el servicio
+
+Copie la plantilla y ajuste las rutas si su usuario o instalación de Node difieren:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/mec.service.example ~/.config/systemd/user/mec.service
+systemctl --user daemon-reload
+systemctl --user enable --now mec
+```
+
+Para que el servicio siga activo sin una sesión interactiva abierta:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### 3. Comandos de operación
+
+| Acción | Comando |
+|---|---|
+| Ver estado | `systemctl --user status mec` |
+| Reiniciar tras cambios de código | `npm run build && systemctl --user restart mec` |
+| Ver logs | `journalctl --user -u mec -f` |
+| Detener | `systemctl --user stop mec` |
+
+La app queda en `http://127.0.0.1:43128` con login activo.
+
+### 4. Arranque con Windows (WSL)
+
+El servicio arranca cuando **WSL arranca**. Por defecto WSL no se inicia al prender la PC.
+
+- **Manual:** abrir una terminal WSL una vez por sesión de Windows.
+- **Automático:** crear una tarea programada en Windows que ejecute `wsl -d <distro> --exec true` al iniciar sesión.
+
+### 5. Acceso desde otra PC en la red local (opcional)
+
+El servidor escucha en `0.0.0.0`. Desde otra PC en la misma red:
+
+`http://<IP-de-tu-PC-en-WSL>:43128`
+
+Requiere permitir el puerto 43128 en el firewall de Windows. Solo recomendable en red de confianza.
+
 ## Verificación del primer deploy
 
 1. Abra la URL pública y confirme la pantalla de login.
@@ -113,17 +186,22 @@ Use un proceso supervisor (`systemd`, `pm2`, etc.) y un reverse proxy Nginx igua
 5. Revise **Auditoría** y confirme que el actor registrado es el usuario logueado.
 6. Ejecute un backup manual con `deploy/backup.sh`.
 
-## Nuevo cliente
+## Entregar a un nuevo cliente (checklist)
 
-Para cada cliente nuevo:
+Use esta lista para cada empresa. No comparta instalaciones entre clientes.
 
-1. Nuevo VPS o nuevo directorio en el mismo servidor.
-2. Clonar el mismo repositorio.
-3. `.env` propio con credenciales distintas.
-4. Volumen `data/` independiente.
-5. Dominio propio (por ejemplo `mec.cliente.com`).
+| Paso | Acción | Verificación |
+|---|---|---|
+| 1 | Nuevo VPS o directorio aislado en el servidor | Rutas y contenedores distintos por cliente |
+| 2 | `git clone` del repositorio | Mismo código, distinto entorno |
+| 3 | `cp .env.example .env` con `ADMIN_PASSWORD` y `SESSION_SECRET` únicos | Credenciales distintas por cliente |
+| 4 | Volumen `data/` propio (`./data:/app/data` en Docker) | Base SQLite vacía al inicio |
+| 5 | Dominio propio (ej. `mec.cliente.com`) + HTTPS | URL exclusiva del cliente |
+| 6 | `docker compose up -d --build` | Login funcional |
+| 7 | Importar archivo de prueba y conciliar una partida | Datos solo en su `conciliacion.db` |
+| 8 | Configurar backup diario (`deploy/backup.sh`) | Respaldo en `data/backups/` |
 
-No se requieren cambios de código por cliente.
+No se requieren cambios de código por cliente. El aislamiento es por infraestructura, no por lógica multi-empresa en la aplicación.
 
 ## Comandos útiles
 
