@@ -122,6 +122,22 @@ test('combined statuses and permanent deletion keep reconciled movements', async
     () => db.reverseReconciliationPartial(partialGroup.reconciliationId, [remaining[0]!.id], 'Selección desbalanceada'),
     /desbalanceada/,
   )
+
+  db.importBatches([
+    { name: 'adj-b.txt', rows: [{ origin: 'BANCO' as const, date: '2026-09-08', debitCents: 200, dealer: '1337', notes: 'Ajuste purge banco', fingerprint: 'banco-adj-purge' }] },
+    { name: 'adj-l.xls', rows: [{ origin: 'LIBRO' as const, date: '2026-09-08', creditCents: 150, sector: '211112001001', notes: 'Ajuste purge libro', fingerprint: 'libro-adj-purge' }] },
+  ])
+  const diffPending = db.listMovements({ status: 'PENDIENTE' })
+  const diffBank = diffPending.find((row) => row.notes === 'Ajuste purge banco')
+  const diffBook = diffPending.find((row) => row.notes === 'Ajuste purge libro')
+  if (!diffBank || !diffBook) throw new Error('No se cargaron las partidas de ajuste')
+  const diffGroup = db.confirmReconciliation([diffBank.id, diffBook.id], { reason: 'Diferencia de prueba E2E' })
+  const diffAdjustment = db.getMovements([diffGroup.adjustmentId!])[0]
+  if (!diffAdjustment?.isAdjustment) throw new Error('No se generó el ajuste')
+  db.reverseReconciliation(diffGroup.reconciliationId, 'Revertir ajuste de prueba')
+  assert.equal(db.getMovements([diffAdjustment.id])[0]?.status, 'ELIMINADO')
+  assert.equal(db.purgeMovements([diffAdjustment.id]).deleted, 1)
+  assert.equal(db.getMovements([diffAdjustment.id]).length, 0)
 })
 
 test('libro-only reconciliation and pending adjustments can be closed later', async () => {

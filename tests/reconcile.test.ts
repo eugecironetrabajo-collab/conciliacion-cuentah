@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { automaticProposal, balanceSummary, candidateFor, columnAmountCents, matchesConcept, nextSort, referenceOne, rowAmountCents, sortMovements } from '../src/reconcile.js'
+import { automaticProposal, balanceSummary, candidateFor, columnAmountCents, matchesConcept, nextSort, referenceOne, rowAmountCents, sortableAmountCents, sortMovements } from '../src/reconcile.js'
 import { parseAmount, parseText } from '../src/importers.js'
 import type { Movement } from '../src/types.js'
 
@@ -79,25 +79,31 @@ test('N:1 reconciliation creates a debit-book adjustment when credits are greate
   assert.equal(balanceSummary(rows).adjustmentCents, 5_000)
 })
 
-test('amount sort uses the visible column value, largest first', () => {
+test('amount sort uses row magnitude regardless of ledger column, largest first', () => {
   const rows = [
     movement({ id: 1, origin: 'BANCO', debitCents: 2_000 }),
     movement({ id: 2, origin: 'BANCO', creditCents: 1_500 }),
     movement({ id: 3, origin: 'LIBRO', debitCents: 1_800 }),
+    movement({ id: 4, origin: 'LIBRO', creditCents: 2_200 }),
   ]
-  assert.deepEqual(rows.map(rowAmountCents), [2_000, 1_500, 1_800])
+  assert.deepEqual(rows.map(rowAmountCents), [2_000, 1_500, 1_800, 2_200])
+  assert.deepEqual(rows.map(sortableAmountCents), [2_000, 1_500, 1_800, 2_200])
   assert.equal(columnAmountCents(rows[0], 'bank-debit'), 2_000)
   assert.equal(columnAmountCents(rows[2], 'book-debit'), 1_800)
+  assert.equal(columnAmountCents(rows[3], 'book-credit'), 2_200)
+  const amountDesc = [1, 3, 2]
   const bankDebitDesc = nextSort(null, 'amount', 'bank-debit')
   assert.equal(bankDebitDesc.direction, 'desc')
-  assert.deepEqual(sortMovements(rows, bankDebitDesc).map((row) => row.id), [1, 2, 3])
+  assert.deepEqual(sortMovements(rows.slice(0, 3), bankDebitDesc).map((row) => row.id), amountDesc)
   const bookDebitDesc = nextSort(null, 'amount', 'book-debit')
-  assert.deepEqual(sortMovements(rows, bookDebitDesc).map((row) => row.id), [3, 1, 2])
+  assert.deepEqual(sortMovements(rows.slice(0, 3), bookDebitDesc).map((row) => row.id), amountDesc)
+  const bookCreditDesc = nextSort(null, 'amount', 'book-credit')
+  assert.deepEqual(sortMovements(rows, bookCreditDesc).map((row) => row.id), [4, 1, 3, 2])
   const debitDesc = nextSort(null, 'debit', 'debit')
   assert.equal(debitDesc.direction, 'desc')
-  assert.deepEqual(sortMovements(rows, debitDesc).map((row) => row.id), [1, 3, 2])
+  assert.deepEqual(sortMovements(rows, debitDesc).map((row) => row.id), [1, 3, 2, 4])
   const creditDesc = nextSort(null, 'credit', 'credit')
-  assert.deepEqual(sortMovements(rows, creditDesc).map((row) => row.id), [2, 1, 3])
+  assert.deepEqual(sortMovements(rows, creditDesc).map((row) => row.id), [4, 2, 1, 3])
 })
 
 test('text columns sort alphabetically and reference helpers match display', () => {

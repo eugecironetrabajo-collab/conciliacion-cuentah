@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Respaldo seguro en Cursor (origin). No usa --force ni toca main.
+# Obsoleto: el remoto origin (Cursor Cloud) fue eliminado a propósito.
+# Respaldo: git push github <rama>
 set -euo pipefail
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo "No hay remoto 'origin' (Cursor Cloud). Use: git push github \$(git branch --show-current)"
+  exit 1
+fi
 
 BRANCH="$(git branch --show-current)"
 if [[ -z "$(git status --porcelain)" ]]; then

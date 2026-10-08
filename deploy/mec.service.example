@@ -1,0 +1,14 @@
+[Unit]
+Description=MEC - Conciliación Cuenta H
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/eugecirone/proyectos/recon-h
+EnvironmentFile=/home/eugecirone/proyectos/recon-h/.env
+ExecStart=/home/eugecirone/.nvm/versions/node/v22.23.3/bin/node /home/eugecirone/proyectos/recon-h/node_modules/tsx/dist/cli.mjs src/server.ts
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

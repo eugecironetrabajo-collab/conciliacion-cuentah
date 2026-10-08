@@ -1115,6 +1115,20 @@ h1 {
 
 .modal.wide { width: min(1420px, 100%); }
 
+.modal.wide.reversal-workspace {
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+  overflow: auto;
+}
+
+.modal.wide.reversal-workspace .ledger-totals,
+.modal.wide.reversal-workspace .reason-field,
+.modal.wide.reversal-workspace .modal-actions,
+.modal.wide.reversal-workspace .modal-head {
+  flex-shrink: 0;
+}
+
 .modal-head {
   padding: var(--mec-space-4);
   display: flex;
@@ -1180,13 +1194,44 @@ h1 {
 
 .reversal-quadrant {
   margin: var(--mec-space-3) var(--mec-space-4) 0;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--mec-border);
   border-radius: var(--mec-radius-sm);
 }
 
 .reversal-quadrant.prepared { border-color: #9fc3b5; }
-.reversal-ledger { height: 175px; }
+.reversal-workspace-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex: 0 0 auto;
+  min-height: min(560px, 56vh);
+  margin: 0 var(--mec-space-4);
+}
+
+.reversal-workspace-panels .reversal-quadrant {
+  margin: var(--mec-space-2) 0 0;
+}
+
+.reversal-workspace-panels .reversal-quadrant:first-child { margin-top: 0; }
+
+.reversal-ledger-top {
+  height: 300px;
+  min-height: 160px;
+  max-height: 62vh;
+  resize: vertical;
+  overflow: auto;
+}
+
+.reversal-ledger-bottom {
+  min-height: 180px;
+  height: 220px;
+  max-height: 38vh;
+  resize: vertical;
+  overflow: auto;
+}
+
+.reversal-splitter { margin: var(--mec-space-1) 0; }
 
 .reason-field {
   margin: var(--mec-space-3) var(--mec-space-4);
