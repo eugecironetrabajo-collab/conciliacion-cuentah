@@ -216,6 +216,8 @@ docker compose down
 Estos scripts no modifican `main`, no usan `--force` y no tocan la base local:
 
 ```bash
-./deploy/push-cursor.sh              # sube la rama actual a origin (Cursor)
-./deploy/setup-github-remote.sh URL  # agrega remoto github sin reemplazar origin
+git push github dev                  # respaldo en GitHub (remoto privado)
+./deploy/setup-github-remote.sh URL  # agrega remoto github si aún no existe
 ```
+
+El repositorio en Cursor Cloud (`origin`) fue dado de baja; no volver a publicar ahí si el objetivo es trabajar solo en local + GitHub privado.
