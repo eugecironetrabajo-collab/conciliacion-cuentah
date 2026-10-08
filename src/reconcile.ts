@@ -31,6 +31,10 @@ export function rowAmountCents(row: Pick<Movement, 'origin' | 'debitCents' | 'cr
   return 0
 }
 
+export function sortableAmountCents(row: Pick<Movement, 'debitCents' | 'creditCents'>) {
+  return Math.max(row.debitCents, row.creditCents)
+}
+
 export function columnAmountCents(row: Movement, column: string) {
   if (column === 'book-debit') return row.origin === 'LIBRO' ? row.debitCents : 0
   if (column === 'bank-credit') return row.origin === 'BANCO' ? row.creditCents : 0
@@ -70,7 +74,7 @@ const sortValue = (row: Movement, sort: ColumnSort): string | number => {
     case 'reference2': return row.ref2
     case 'notes': return row.notes
     case 'assignee': return row.assignee
-    case 'amount': return columnAmountCents(row, sort.column)
+    case 'amount': return sortableAmountCents(row)
     case 'debit': return row.debitCents
     case 'credit': return row.creditCents
     default: return row.notes

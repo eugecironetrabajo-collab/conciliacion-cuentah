@@ -136,26 +136,41 @@ export function setupQuadrantSplitter(
   bottomLedger: HTMLElement,
   splitter: HTMLElement,
   storageKey: string,
+  options?: { defaultTopHeight?: number; minPersistedHeight?: number },
 ) {
+  const defaultTopHeight = options?.defaultTopHeight ?? 300
+  const minPersistedHeight = options?.minPersistedHeight ?? 200
   const saved = Number(localStorage.getItem(storageKey))
-  if (Number.isFinite(saved) && saved > 120) topLedger.style.height = `${saved}px`
+  if (Number.isFinite(saved) && saved >= minPersistedHeight) topLedger.style.height = `${saved}px`
+  else topLedger.style.height = `${defaultTopHeight}px`
 
   splitter.addEventListener('mousedown', (event) => {
     event.preventDefault()
     const startY = event.clientY
     const startHeight = topLedger.getBoundingClientRect().height
+    const panels = topLedger.closest('.reconcile-workspace, .reversal-workspace-panels, .modal')
 
     const onMove = (moveEvent: MouseEvent) => {
-      const height = Math.max(140, Math.round(startHeight + moveEvent.clientY - startY))
+      const container = panels?.getBoundingClientRect()
+      const bottomMin = 180
+      const reserved = bottomMin + (splitter.getBoundingClientRect().height || 28) + 120
+      const containerHeight = container
+        ? Math.max(container.height, 480)
+        : Math.round(window.innerHeight * 0.62)
+      const maxTop = Math.max(minPersistedHeight, Math.round(containerHeight - reserved))
+      const height = Math.min(
+        maxTop,
+        Math.max(minPersistedHeight, Math.round(startHeight + moveEvent.clientY - startY)),
+      )
       topLedger.style.height = `${height}px`
-      bottomLedger.style.maxHeight = 'none'
-      bottomLedger.style.minHeight = '140px'
+      bottomLedger.style.minHeight = `${bottomMin}px`
     }
 
     const onUp = () => {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
-      localStorage.setItem(storageKey, String(Math.round(topLedger.getBoundingClientRect().height)))
+      const persisted = Math.round(topLedger.getBoundingClientRect().height)
+      if (persisted >= minPersistedHeight) localStorage.setItem(storageKey, String(persisted))
     }
 
     document.addEventListener('mousemove', onMove)

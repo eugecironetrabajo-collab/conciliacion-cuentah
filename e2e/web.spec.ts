@@ -150,6 +150,17 @@ test('opens a numbered group and reverses all original movements', async ({ page
   await page.locator(`tr[data-reconciliation="${reconciliationId}"]`).first().dblclick()
   await expect(page.getByRole('heading', { name: `Conciliación N.º ${reconciliationId}` })).toBeVisible()
   await page.getByRole('button', { name: 'Preparar reversión' }).click()
+  const activeLines = page.locator('[data-reverse-active]')
+  const activeCount = await activeLines.count()
+  expect(activeCount).toBeGreaterThan(0)
+  for (let index = 0; index < activeCount; index += 1) await activeLines.nth(index).click()
+  await page.keyboard.press('Enter')
+  const stagedLines = page.locator('[data-reverse-staged]')
+  await expect(stagedLines).toHaveCount(activeCount)
+  await expect(activeLines).toHaveCount(0)
+  for (let index = 0; index < activeCount; index += 1) await stagedLines.nth(index).click()
+  await page.keyboard.press('Enter')
+  await expect(activeLines).toHaveCount(activeCount)
   const reversalReference = page.locator('button[data-grid="reversal-active"][data-sort="reference"]')
   await reversalReference.dblclick()
   await expect(reversalReference).toHaveAttribute('aria-sort', 'ascending')
@@ -269,7 +280,7 @@ test('sorts conciliation grids and filters pending rows by concept', async ({ pa
   const pending = page.locator('#pending-grid [data-sel]')
   await expect(pending.first()).toBeVisible()
 
-  const read = async (name: 'date' | 'bankDebit' | 'notes') =>
+  const read = async (name: 'date' | 'sortAmount' | 'notes') =>
     pending.evaluateAll((rows, key) => rows.map((row) => (row as HTMLElement).dataset[key] ?? ''), name)
 
   const dateHeader = page.locator('.top-ledger button[data-column="date"]')
@@ -283,9 +294,17 @@ test('sorts conciliation grids and filters pending rows by concept', async ({ pa
   const amountHeader = page.locator('.top-ledger button[data-column="bank-debit"]')
   await amountHeader.dblclick()
   await expect(amountHeader).toHaveAttribute('aria-sort', 'descending')
-  assertOrdered((await read('bankDebit')).map(Number), 'desc')
+  const amountDesc = (await read('sortAmount')).map(Number)
+  assertOrdered(amountDesc, 'desc')
   await amountHeader.dblclick()
-  assertOrdered((await read('bankDebit')).map(Number), 'asc')
+  assertOrdered((await read('sortAmount')).map(Number), 'asc')
+
+  const bookCreditHeader = page.locator('.top-ledger button[data-column="book-credit"]')
+  await bookCreditHeader.dblclick()
+  await expect(bookCreditHeader).toHaveAttribute('aria-sort', 'descending')
+  const afterBookCredit = (await read('sortAmount')).map(Number)
+  assertOrdered(afterBookCredit, 'desc')
+  expect(afterBookCredit).toEqual(amountDesc)
 
   const notesHeader = page.locator('.top-ledger button[data-column="notes"]')
   await notesHeader.dblclick()

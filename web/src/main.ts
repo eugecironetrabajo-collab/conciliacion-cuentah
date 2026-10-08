@@ -1,6 +1,6 @@
 import './style.css'
 import { ASSIGNEE_OPTIONS } from '../../src/assignees.js'
-import { columnAmountCents, matchesConcept, nextSort, referenceOne, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
+import { columnAmountCents, matchesConcept, nextSort, referenceOne, sortableAmountCents, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
 import { TERMINALS, movementLabel } from '../../src/terminals.js'
 import { api, escapeHtml as esc, getMovements, getSession, login, logout, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
 import { setupColumnResize, setupQuadrantSplitter } from './resize.js'
@@ -382,12 +382,20 @@ async function renderMovements(root: HTMLElement) {
     visibleItems = sortMovements(items, movementSort)
     document.querySelector('#row-count')!.textContent = String(items.length)
     paintSortButtons(root, 'movements', movementSort)
-    const manageable = (row: Movement) => !row.isAdjustment && (row.status === 'PENDIENTE' || row.status === 'ELIMINADO')
+    const selectable = (row: Movement) =>
+      (!row.isAdjustment && (row.status === 'PENDIENTE' || row.status === 'ELIMINADO'))
+      || (row.isAdjustment && row.status === 'ELIMINADO')
+    const adjustmentBadge = (row: Movement) => {
+      if (!row.isAdjustment) return ''
+      const label = row.status === 'PENDIENTE' ? 'Ajuste' : 'Ajuste eliminado'
+      const ref = row.reconciliationId ? ` #${row.reconciliationId}` : ''
+      return ` <span class="badge pending">${label}${ref}</span>`
+    }
     document.querySelector('#movement-body')!.innerHTML = visibleItems.map((row) => `<tr data-id="${row.id}" data-date="${row.date}" ${row.reconciliationId ? `data-reconciliation="${row.reconciliationId}" tabindex="0" title="Doble clic para ver conciliación ${row.reconciliationId}"` : ''}>
-      <td>${manageable(row) ? `<input class="row-check" type="checkbox" data-id="${row.id}" data-status="${row.status}" aria-label="Seleccionar movimiento ${row.id}">` : ''}</td>
+      <td>${selectable(row) ? `<input class="row-check" type="checkbox" data-id="${row.id}" data-status="${row.status}" data-adjustment="${row.isAdjustment ? '1' : '0'}" aria-label="Seleccionar movimiento ${row.id}">` : ''}</td>
       <td class="muted">#${row.id}</td><td><span class="origin-label ${row.origin.toLowerCase()}">${row.origin}</span></td>
       <td>${esc(movementLabel(row.origin, row.dealer, row.sector))}</td>
-      <td>${statusBadge(row.status)}${row.isAdjustment && row.status === 'PENDIENTE' ? ` <span class="badge pending">Ajuste${row.reconciliationId ? ` #${row.reconciliationId}` : ''}</span>` : ''}</td><td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
+      <td>${statusBadge(row.status)}${adjustmentBadge(row)}</td><td>${shortDate(row.date)}</td><td>${shortDate(row.processDate)}</td><td>${esc(row.receipt)} ${esc(row.orderNo)}</td>
       <td class="mono">${esc(referenceOne(row) || '—')}</td><td class="detail-cell">${esc(row.notes)}</td>
       <td class="number">${row.debitCents ? money(row.debitCents) : '—'}</td><td class="number">${row.creditCents ? money(row.creditCents) : '—'}</td>
       ${assigneeCell(row)}
@@ -405,8 +413,8 @@ async function renderMovements(root: HTMLElement) {
     const selected = () => [...document.querySelectorAll<HTMLInputElement>('.row-check:checked')]
     const refreshBulk = () => {
       const checks = selected()
-      document.querySelector<HTMLButtonElement>('#delete-selected')!.disabled = !checks.some((check) => check.dataset.status === 'PENDIENTE')
-      document.querySelector<HTMLButtonElement>('#restore-selected')!.disabled = !checks.some((check) => check.dataset.status === 'ELIMINADO')
+      document.querySelector<HTMLButtonElement>('#delete-selected')!.disabled = !checks.some((check) => check.dataset.status === 'PENDIENTE' && check.dataset.adjustment !== '1')
+      document.querySelector<HTMLButtonElement>('#restore-selected')!.disabled = !checks.some((check) => check.dataset.status === 'ELIMINADO' && check.dataset.adjustment !== '1')
       document.querySelector<HTMLButtonElement>('#purge-selected')!.disabled = !checks.some((check) => check.dataset.status === 'ELIMINADO')
     }
     const selectVisible = document.querySelector<HTMLInputElement>('#select-visible')!
@@ -416,10 +424,10 @@ async function renderMovements(root: HTMLElement) {
     }
     document.querySelectorAll('.row-check').forEach((check) => check.addEventListener('change', refreshBulk))
     document.querySelector<HTMLButtonElement>('#delete-selected')!.onclick = () => {
-      openDeleteModal(selected().filter((check) => check.dataset.status === 'PENDIENTE').map((check) => Number(check.dataset.id)))
+      openDeleteModal(selected().filter((check) => check.dataset.status === 'PENDIENTE' && check.dataset.adjustment !== '1').map((check) => Number(check.dataset.id)))
     }
     document.querySelector<HTMLButtonElement>('#restore-selected')!.onclick = async () => {
-      const ids = selected().filter((check) => check.dataset.status === 'ELIMINADO').map((check) => Number(check.dataset.id))
+      const ids = selected().filter((check) => check.dataset.status === 'ELIMINADO' && check.dataset.adjustment !== '1').map((check) => Number(check.dataset.id))
       await api('/api/movimientos/restaurar', { method: 'POST', body: JSON.stringify({ ids }) })
       await renderMovements(root)
       toast(`${ids.length} movimiento(s) restaurados a pendientes`)
@@ -526,20 +534,34 @@ function renderReversal(reconciliation: Reconciliation, root: HTMLElement, modal
   const selectedStaged = new Set<number>()
   let activeSort: ColumnSort | null = null
   let stagedSort: ColumnSort | null = null
+  let onReversalKeydown: ((event: KeyboardEvent) => void) | null = null
+  const detachReversalKeydown = () => {
+    if (onReversalKeydown) {
+      document.removeEventListener('keydown', onReversalKeydown)
+      onReversalKeydown = null
+    }
+  }
+  const closeReversalModal = () => {
+    detachReversalKeydown()
+    modalRoot.innerHTML = ''
+  }
   const draw = () => {
     const activeRows = sortMovements(originalRows.filter((row) => !staged.has(row.id)), activeSort)
     const stagedRows = sortMovements(originalRows.filter((row) => staged.has(row.id)), stagedSort)
     const reversalColumns = (grid: 'reversal-active' | 'reversal-staged') => sortableColumns(grid)
+    const previousTopHeight = modalRoot.querySelector<HTMLElement>('.reversal-ledger-top')?.getBoundingClientRect().height
     modalRoot.innerHTML = `<div class="modal-backdrop"><section class="modal wide reversal-workspace">
       <div class="modal-head"><div><span class="eyebrow">Reversión de conciliaciones</span><h2>Conciliación N.º ${reconciliation.id}</h2><p>Revierta una selección si el grupo restante queda balanceado, o revierta todo el grupo.</p></div><button class="modal-close" aria-label="Cerrar">×</button></div>
+      <div class="reversal-workspace-panels">
       <div class="reversal-quadrant"><div class="quadrant-head"><div><span class="step">1</span><div><h2>Conciliación activa</h2><p>Seleccione líneas y bájelas con Enter o el botón.</p></div></div></div>
-        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${reversalColumns('reversal-active')}</tr></thead><tbody>${activeRows.length ? activeRows.map((row) => ledgerRow(row, `data-reverse-active="${row.id}" tabindex="0"`, selectedActive.has(row.id) ? 'selected' : '')).join('') : `<tr><td colspan="13">${empty('Todas las líneas seleccionadas', 'Revise el cuadrante inferior antes de guardar.')}</td></tr>`}</tbody></table></div>
-        <div class="selection-bar"><span>${selectedActive.size} ${selectedActive.size === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}</span><button class="button dark" id="stage-reversal" ${selectedActive.size ? '' : 'disabled'}>Bajar selección ↓</button></div>
+        <div class="ledger-wrap reversal-ledger-top"><table class="ledger"><thead><tr>${reversalColumns('reversal-active')}</tr></thead><tbody>${activeRows.length ? activeRows.map((row) => ledgerRow(row, `data-reverse-active="${row.id}" tabindex="0"`, selectedActive.has(row.id) ? 'selected' : '')).join('') : `<tr><td colspan="13">${empty('Todas las líneas seleccionadas', 'Revise el cuadrante inferior antes de guardar.')}</td></tr>`}</tbody></table></div>
+        <div class="selection-bar"><span id="reversal-active-selection-label">${selectedActive.size} ${selectedActive.size === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}</span><button class="button dark" id="stage-reversal" ${selectedActive.size ? '' : 'disabled'}>Bajar selección ↓</button></div>
       </div>
-      <div class="flow-divider"><span>↓</span><small>Partidas preparadas para reversión</small><span>↓</span></div>
+      <div class="quadrant-splitter reversal-splitter" role="separator" aria-label="Ajustar altura de cuadrantes de reversión"><span>↕</span><small>Arrastre para cambiar el alto</small></div>
       <div class="reversal-quadrant prepared"><div class="quadrant-head"><div><span class="step green">2</span><div><h2>Partidas a devolver a pendientes</h2><p>La línea de ajuste permanece en el historial.</p></div></div></div>
-        <div class="ledger-wrap reversal-ledger"><table class="ledger"><thead><tr>${reversalColumns('reversal-staged')}</tr></thead><tbody>${stagedRows.length ? stagedRows.map((row) => ledgerRow(row, `data-reverse-staged="${row.id}" tabindex="0"`, selectedStaged.has(row.id) ? 'selected' : '')).join('') : `<tr><td colspan="13">${empty('Sin partidas preparadas', 'Seleccione una o más líneas arriba.')}</td></tr>`}</tbody></table></div>
-        <div class="selection-bar"><span>${selectedStaged.size} ${selectedStaged.size === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}</span><button class="button secondary" id="unstage-reversal" ${selectedStaged.size ? '' : 'disabled'}>Subir selección ↑</button></div>
+        <div class="ledger-wrap reversal-ledger-bottom"><table class="ledger"><thead><tr>${reversalColumns('reversal-staged')}</tr></thead><tbody>${stagedRows.length ? stagedRows.map((row) => ledgerRow(row, `data-reverse-staged="${row.id}" tabindex="0"`, selectedStaged.has(row.id) ? 'selected' : '')).join('') : `<tr><td colspan="13">${empty('Sin partidas preparadas', 'Seleccione una o más líneas arriba.')}</td></tr>`}</tbody></table></div>
+        <div class="selection-bar"><span id="reversal-staged-selection-label">${selectedStaged.size} ${selectedStaged.size === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}</span><button class="button secondary" id="unstage-reversal" ${selectedStaged.size ? '' : 'disabled'}>Subir selección ↑</button></div>
+      </div>
       </div>
       <div class="ledger-totals"><div><span>Quedan en el grupo</span><strong id="reversal-remaining-difference"></strong></div><div class="difference"><span>Estado</span><strong id="reversal-balance-status"></strong></div></div>
       <label class="reason-field">Motivo de la reversión<textarea id="reversal-reason" rows="2" placeholder="Explique por qué se revierte esta conciliación"></textarea></label>
@@ -551,35 +573,85 @@ function renderReversal(reconciliation: Reconciliation, root: HTMLElement, modal
     modalRoot.querySelector('#reversal-balance-status')!.textContent = remainingDifference === 0 ? 'Balanceado' : 'Desbalanceado'
     paintSortButtons(modalRoot, 'reversal-active', activeSort)
     paintSortButtons(modalRoot, 'reversal-staged', stagedSort)
-    modalRoot.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', () => modalRoot.innerHTML = ''))
+    modalRoot.querySelectorAll('.modal-close').forEach((button) => button.addEventListener('click', closeReversalModal))
+    const selectionLabel = (count: number) => `${count} ${count === 1 ? 'línea seleccionada' : 'líneas seleccionadas'}`
+    const refreshSelectionUi = () => {
+      modalRoot.querySelector('#reversal-active-selection-label')!.textContent = selectionLabel(selectedActive.size)
+      modalRoot.querySelector('#reversal-staged-selection-label')!.textContent = selectionLabel(selectedStaged.size)
+      modalRoot.querySelector<HTMLButtonElement>('#stage-reversal')!.disabled = selectedActive.size === 0
+      modalRoot.querySelector<HTMLButtonElement>('#unstage-reversal')!.disabled = selectedStaged.size === 0
+      modalRoot.querySelectorAll<HTMLElement>('[data-reverse-active]').forEach((row) => {
+        const rowId = Number(row.dataset.reverseActive)
+        row.classList.toggle('selected', selectedActive.has(rowId))
+      })
+      modalRoot.querySelectorAll<HTMLElement>('[data-reverse-staged]').forEach((row) => {
+        const rowId = Number(row.dataset.reverseStaged)
+        row.classList.toggle('selected', selectedStaged.has(rowId))
+      })
+    }
     const toggleSelection = (id: number, selected: Set<number>) => {
       if (selected.has(id)) selected.delete(id)
       else selected.add(id)
-      draw()
+      refreshSelectionUi()
     }
     const moveSelection = (from: Set<number>, moveToStaged: boolean, clearSelection: Set<number>) => {
-      from.forEach((id) => moveToStaged ? staged.add(id) : staged.delete(id))
+      const ids = [...from]
       from.clear()
+      ids.forEach((movementId) => (moveToStaged ? staged.add(movementId) : staged.delete(movementId)))
       clearSelection.clear()
       draw()
+    }
+    const stageActive = () => {
+      if (!selectedActive.size) return
+      moveSelection(new Set(selectedActive), true, selectedStaged)
+    }
+    const unstageStaged = () => {
+      if (!selectedStaged.size) return
+      moveSelection(new Set(selectedStaged), false, selectedActive)
     }
     modalRoot.querySelectorAll<HTMLElement>('[data-reverse-active]').forEach((row) => {
       const id = Number(row.dataset.reverseActive)
       row.addEventListener('click', () => toggleSelection(id, selectedActive))
-      row.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') moveSelection(new Set([id]), true, selectedActive) })
+      row.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        event.stopPropagation()
+        if (selectedActive.size > 0) stageActive()
+        else moveSelection(new Set([id]), true, selectedStaged)
+      })
     })
     modalRoot.querySelectorAll<HTMLElement>('[data-reverse-staged]').forEach((row) => {
       const id = Number(row.dataset.reverseStaged)
       row.addEventListener('click', () => toggleSelection(id, selectedStaged))
-      row.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') moveSelection(selectedStaged, false, selectedActive) })
+      row.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        event.stopPropagation()
+        if (selectedStaged.size > 0) unstageStaged()
+        else moveSelection(new Set([id]), false, selectedActive)
+      })
     })
-    modalRoot.querySelector('#stage-reversal')?.addEventListener('click', () => moveSelection(selectedActive, true, selectedStaged))
-    modalRoot.querySelector('#unstage-reversal')?.addEventListener('click', () => moveSelection(selectedStaged, false, selectedActive))
+    modalRoot.querySelector('#stage-reversal')?.addEventListener('click', stageActive)
+    modalRoot.querySelector('#unstage-reversal')?.addEventListener('click', unstageStaged)
+    detachReversalKeydown()
+    onReversalKeydown = (event: KeyboardEvent) => {
+      if (!modalRoot.isConnected || event.key !== 'Enter' || isFormField(event.target)) return
+      if (selectedActive.size > 0) {
+        event.preventDefault()
+        stageActive()
+        return
+      }
+      if (selectedStaged.size > 0) {
+        event.preventDefault()
+        unstageStaged()
+      }
+    }
+    document.addEventListener('keydown', onReversalKeydown)
     const reason = () => (modalRoot.querySelector('#reversal-reason') as HTMLTextAreaElement).value.trim()
     modalRoot.querySelector('#save-full-reversal')?.addEventListener('click', async () => {
       if (!reason()) return toast('Indique el motivo de la reversión', 'error')
       await api(`/api/reconciliaciones/${reconciliation.id}/revertir`, { method: 'POST', body: JSON.stringify({ motivo: reason() }) })
-      modalRoot.innerHTML = ''
+      closeReversalModal()
       toast(`Conciliación ${reconciliation.id} revertida completamente`)
       await renderMovements(root)
     })
@@ -587,7 +659,7 @@ function renderReversal(reconciliation: Reconciliation, root: HTMLElement, modal
       if (remainingDifference !== 0) return toast('La reversión parcial dejaría el grupo desbalanceado', 'error')
       if (!reason()) return toast('Indique el motivo de la reversión', 'error')
       await api(`/api/reconciliaciones/${reconciliation.id}/revertir-parcial`, { method: 'POST', body: JSON.stringify({ movementIds: [...staged], motivo: reason() }) })
-      modalRoot.innerHTML = ''
+      closeReversalModal()
       toast(`${staged.size} partida(s) volvieron a pendientes`)
       await renderMovements(root)
     })
@@ -598,6 +670,18 @@ function renderReversal(reconciliation: Reconciliation, root: HTMLElement, modal
       else stagedSort = next
       draw()
     })
+    const topLedger = modalRoot.querySelector<HTMLElement>('.reversal-ledger-top')
+    const bottomLedger = modalRoot.querySelector<HTMLElement>('.reversal-ledger-bottom')
+    const splitter = modalRoot.querySelector<HTMLElement>('.reversal-splitter')
+    if (topLedger && bottomLedger && splitter) {
+      if (previousTopHeight && previousTopHeight >= 200) {
+        topLedger.style.height = `${Math.round(previousTopHeight)}px`
+      }
+      setupQuadrantSplitter(topLedger, bottomLedger, splitter, 'cuenta-h:reversal-heights-v2', {
+        defaultTopHeight: 300,
+        minPersistedHeight: 200,
+      })
+    }
   }
   draw()
 }
@@ -752,7 +836,7 @@ async function renderReconcile(root: HTMLElement) {
     )
     const grid = document.querySelector('#pending-grid')!
     grid.innerHTML = available.length
-      ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" data-date="${row.date}" data-bank-debit="${columnAmountCents(row, 'bank-debit')}" data-notes="${esc(row.notes)}" tabindex="0"`, [
+      ? available.map((row) => ledgerRow(row, `data-sel="${row.id}" data-date="${row.date}" data-bank-debit="${columnAmountCents(row, 'bank-debit')}" data-sort-amount="${sortableAmountCents(row)}" data-notes="${esc(row.notes)}" tabindex="0"`, [
           selectedPending.has(row.id) ? 'selected' : '',
         ].join(' '))).join('')
       : `<tr><td colspan="13">${empty('Sin partidas pendientes', 'Importe nuevos movimientos o confirme las partidas preparadas.')}</td></tr>`

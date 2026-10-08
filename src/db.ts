@@ -337,7 +337,10 @@ export function purgeMovements(ids: number[]) {
     JOIN reconciliations r ON r.id = ri.reconciliation_id
     WHERE ri.movement_id = ? AND r.status = 'ACTIVA'
   `)
-  const removable = rows.filter((row) => row.status === 'ELIMINADO' && !activeLink.get(row.id))
+  const removable = rows.filter((row) => {
+    if (row.isAdjustment && row.status !== 'ELIMINADO') return false
+    return row.status === 'ELIMINADO' && !activeLink.get(row.id)
+  })
   if (!removable.length) throw new Error('Solo se pueden borrar definitivamente movimientos eliminados que no están en una conciliación activa')
   const removableIds = removable.map((row) => row.id)
   db.transaction(() => {
