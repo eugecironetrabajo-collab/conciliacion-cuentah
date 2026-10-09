@@ -150,7 +150,6 @@ function parseFixedWidth(text: string): ParsedImport {
       rows.push({
         origin: 'BANCO',
         date,
-        processDate: date,
         receipt,
         sector: account,
         orderNo: documentNo,
@@ -238,7 +237,6 @@ function parseQuiter(buffer: Buffer): ParsedImport {
       rows.push({
         origin: 'LIBRO',
         date,
-        processDate: date,
         receipt: identity.receipt,
         sector: account,
         orderNo: identity.orderNo,
@@ -327,7 +325,6 @@ function parseTerminalSummary(buffer: Buffer): ParsedImport {
       rows.push({
         origin: 'BANCO',
         date,
-        processDate: date,
         receipt,
         sector: '41110100',
         orderNo: documentNo,
@@ -379,7 +376,6 @@ function parseDelimited(text: string, origin: Origin): ParsedImport {
       const row: ImportRow = {
         origin,
         date,
-        processDate: lookup(record, 'processDate') ? parseDate(lookup(record, 'processDate')) : date,
         receipt: String(lookup(record, 'receipt')),
         sector: String(lookup(record, 'sector')),
         orderNo: String(lookup(record, 'orderNo')),
@@ -391,7 +387,7 @@ function parseDelimited(text: string, origin: Origin): ParsedImport {
         dealer: String(lookup(record, 'dealer') || '6'),
       }
       row.fingerprint = fingerprint([
-        origin, row.date, row.processDate, row.receipt, row.orderNo, row.ref1, row.ref2,
+        origin, row.date, row.date, row.receipt, row.orderNo, row.ref1, row.ref2,
         row.debitCents, row.creditCents, row.notes, row.dealer,
       ])
       return [row]

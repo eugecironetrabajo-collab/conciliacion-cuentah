@@ -20,7 +20,7 @@ export const rowFingerprint = (row: ImportRow) => row.fingerprint ?? JSON.string
 export const movementValues = (row: ImportRow) => ({
   origin: row.origin,
   date: row.date,
-  processDate: row.processDate ?? loadDate(),
+  processDate: loadDate(),
   receipt: row.receipt ?? '',
   sector: row.sector ?? '',
   orderNo: row.orderNo ?? '',

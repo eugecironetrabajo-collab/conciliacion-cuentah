@@ -124,6 +124,19 @@ const DEMO_ROWS: ImportRow[] = [
   { origin: 'LIBRO', date: '2025-12-01', processDate: '2025-12-01', receipt: 'VDL', orderNo: '5754', ref1: '9818850/1', debitCents: 5881432, notes: 'L-14/01/2026-Doc. ANC 4396 S01 Compras' },
 ]
 
+async function ensureProcessDateBackfill() {
+  const ref = metaDoc()
+  const meta = await getDoc(ref)
+  if (meta.data()?.process_date_backfill_v1) return
+  const today = loadDate()
+  const rows = await loadAllMovements(true)
+  const patches = rows
+    .filter((row) => row.processDate === row.date)
+    .map((row) => ({ id: row.id, data: { processDate: today } }))
+  if (patches.length) await patchMovementFields(patches)
+  await setDoc(ref, { process_date_backfill_v1: true }, { merge: true })
+}
+
 export async function ensureDemoSeeded() {
   const meta = await getDoc(metaDoc())
   if (meta.exists() && Number(meta.data()?.movement ?? 0) > 0) return
@@ -151,6 +164,7 @@ export async function firestoreSession() {
   const user = getFirebaseAuth().currentUser ?? (await waitForAuth())
   if (!user) throw new Error('No autenticado')
   await ensureDemoSeeded()
+  await ensureProcessDateBackfill()
   return { user: user.email ?? user.uid, auth: true }
 }
 
@@ -166,6 +180,7 @@ export async function firestoreLogout() {
 
 export async function firestoreGetMovements(queryString = '') {
   await ensureDemoSeeded()
+  await ensureProcessDateBackfill()
   const rows = await loadAllMovements(true)
   return filterMovements(rows, parseMovementQuery(queryString))
 }
