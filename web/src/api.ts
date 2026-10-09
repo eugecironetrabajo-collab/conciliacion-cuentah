@@ -1,3 +1,6 @@
+import { firebaseEnabled } from './firebase-app.js'
+import { firestoreApi } from './data/firestore-store.js'
+
 export interface Movement {
   id: number
   origin: 'BANCO' | 'LIBRO'
@@ -39,6 +42,19 @@ export interface Reconciliation {
 }
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  if (firebaseEnabled()) {
+    try {
+      return await firestoreApi<T>(path, options)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'REPORT_CSV') {
+        throw error
+      }
+      if (error instanceof Error && error.message === 'No autenticado') {
+        window.dispatchEvent(new CustomEvent('mec:unauthorized'))
+      }
+      throw error
+    }
+  }
   const response = await fetch(path, {
     credentials: 'include',
     ...options,
@@ -77,3 +93,5 @@ export const escapeHtml = (value: unknown) => String(value ?? '')
   .replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;')
   .replaceAll('"', '&quot;')
+
+export const isFirestoreBackend = () => firebaseEnabled()

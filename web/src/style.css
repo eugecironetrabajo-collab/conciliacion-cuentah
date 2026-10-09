@@ -242,6 +242,15 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.database-pill .build-id {
+  display: block;
+  margin-top: 2px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 9px;
+  opacity: 0.85;
+}
+
 .avatar {
   width: 32px;
   height: 32px;

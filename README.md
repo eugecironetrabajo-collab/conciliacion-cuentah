@@ -114,6 +114,8 @@ docker compose up -d --build
 
 La base queda en `./data/conciliacion.db`. Guía completa de VPS, Nginx, HTTPS, backups y checklist por cliente: [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
+Despliegue gratuito en Firebase (Hosting + Firestore, plan Spark): [`docs/FIREBASE.md`](docs/FIREBASE.md). La versión SQLite anterior se conserva con el tag `v1-sqlite-stable`.
+
 ## Desarrollo
 
 Requiere Node.js 22 o posterior.
@@ -138,8 +140,16 @@ DB_PATH=/ruta/cuenta-h.db npm run dev
 ```bash
 npm run check      # tipos
 npm test           # pruebas unitarias
-npm run build      # build de producción
+npm run build      # build de producción (SQLite / API)
 npm run test:e2e   # Playwright
+```
+
+Firebase (nube Spark): checklist [`docs/FIREBASE_CONSOLE_SETUP.md`](docs/FIREBASE_CONSOLE_SETUP.md), uso diario [`docs/USO_DIARIO_NUBE.md`](docs/USO_DIARIO_NUBE.md).
+
+```bash
+npx firebase login
+npm run firebase:pull-env
+npm run firebase:deploy
 ```
 
 En producción, después de `npm run build`, ejecute `npm start`.

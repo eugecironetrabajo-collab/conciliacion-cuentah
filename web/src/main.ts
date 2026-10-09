@@ -2,7 +2,7 @@ import './style.css'
 import { ASSIGNEE_OPTIONS } from '../../src/assignees.js'
 import { columnAmountCents, matchesConcept, nextSort, referenceOne, sortableAmountCents, sortMovements, type ColumnSort, type SortKey } from '../../src/reconcile.js'
 import { TERMINALS, movementLabel } from '../../src/terminals.js'
-import { api, escapeHtml as esc, getMovements, getSession, login, logout, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
+import { api, escapeHtml as esc, getMovements, getSession, isFirestoreBackend, login, logout, money, shortDate, type Candidate, type Movement, type Reconciliation } from './api'
 import { setupColumnResize, setupQuadrantSplitter } from './resize.js'
 
 const isFormField = (target: EventTarget | null) => {
@@ -55,7 +55,7 @@ function renderLogin(error = '') {
         <p>Ingrese sus credenciales para acceder a la instalación.</p>
         ${error ? `<div class="login-error">${esc(error)}</div>` : ''}
         <form id="login-form" class="login-form">
-          <label>Usuario<input name="username" autocomplete="username" required></label>
+          <label>${isFirestoreBackend() ? 'Correo electrónico' : 'Usuario'}<input name="username" type="${isFirestoreBackend() ? 'email' : 'text'}" autocomplete="username" required></label>
           <label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label>
           <button class="button primary" type="submit">Ingresar <span>→</span></button>
         </form>
@@ -98,7 +98,7 @@ function shell() {
         </div>
         <div class="top-actions">
           <span class="live"><i></i>Sistema operativo</span>
-          <span class="database-pill"><small>Base activa</small><b id="db-badge">conciliacion.db</b></span>
+          <span class="database-pill"><small>Base activa</small><b id="db-badge">${isFirestoreBackend() ? 'Firestore' : 'conciliacion.db'}</b>${isFirestoreBackend() ? `<small class="build-id" title="Versión del cliente">${__MEC_BUILD_ID__}</small>` : ''}</span>
           <button class="user-menu" id="logout-button" type="button" title="Cerrar sesión">
             <span class="avatar" id="session-avatar">${esc(initials(sessionUser))}</span>
             <span class="user-menu-copy"><b id="session-user-name">${esc(sessionUser)}</b><small id="session-user-subtitle">Sesión activa</small></span>
@@ -471,10 +471,14 @@ async function renderMovements(root: HTMLElement) {
         toast('Indique el motivo de la eliminación', 'error')
         return
       }
-      await api('/api/movimientos/eliminar', { method: 'POST', body: JSON.stringify({ ids, motivo }) })
-      close()
-      await renderMovements(root)
-      toast(`${ids.length} movimiento(s) eliminados`)
+      try {
+        const result = await api<{ updated: number }>('/api/movimientos/eliminar', { method: 'POST', body: JSON.stringify({ ids, motivo }) })
+        close()
+        await renderMovements(root)
+        toast(`${result.updated} movimiento(s) eliminados`)
+      } catch (error) {
+        toast(error instanceof Error ? error.message : 'No se pudo eliminar', 'error')
+      }
     })
   }
   bindSortButtons(root, (button) => {
@@ -1116,9 +1120,28 @@ function renderReports(root: HTMLElement) {
         <button class="button primary">Descargar CSV <span>↓</span></button>
       </form>
     </section>`
-  document.querySelector('#report-form')!.addEventListener('submit', (event) => {
+  document.querySelector('#report-form')!.addEventListener('submit', async (event) => {
     event.preventDefault()
     const params = new URLSearchParams(new FormData(event.target as HTMLFormElement) as unknown as Record<string, string>)
+    if (isFirestoreBackend()) {
+      try {
+        await api(`/api/report?${params}`)
+      } catch (error) {
+        const csv = (error as Error & { csv?: string }).csv
+        if (!csv) {
+          toast(error instanceof Error ? error.message : 'No se pudo generar el reporte', 'error')
+          return
+        }
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = 'conciliacion.csv'
+        link.click()
+        URL.revokeObjectURL(url)
+      }
+      return
+    }
     window.open(`/api/report?${params}`, '_blank')
   })
 }
