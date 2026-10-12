@@ -8,8 +8,8 @@ const authFile = join(dirname(fileURLToPath(import.meta.url)), '.auth/user.json'
 setup('authenticate', async ({ page }) => {
   mkdirSync(dirname(authFile), { recursive: true })
   await page.goto('/')
-  await page.fill('input[name="username"]', 'admin')
-  await page.fill('input[name="password"]', 'e2e-test')
+  await page.locator('input[name="username"]').fill('admin')
+  await page.locator('input[name="password"]').fill('e2e-test')
   await page.getByRole('button', { name: /Ingresar/ }).click()
   await expect(page.getByRole('link', { name: 'Resumen' })).toBeVisible()
   await page.context().storageState({ path: authFile })

@@ -19,6 +19,14 @@ export default defineConfig({
     url: e2eBaseUrl,
     reuseExistingServer: false,
     timeout: 120_000,
+    env: {
+      ...process.env,
+      // E2E usa Express + SQLite; no mezclar con web/.env.local (Firestore).
+      VITE_BACKEND: 'api',
+      VITE_FIREBASE_API_KEY: '',
+      VITE_FIREBASE_PROJECT_ID: '',
+      VITE_FIREBASE_APP_ID: '',
+    },
   },
   projects: [
     { name: 'setup', testMatch: /auth\.setup\.ts/ },
