@@ -116,6 +116,10 @@ La base queda en `./data/conciliacion.db`. Guía completa de VPS, Nginx, HTTPS, 
 
 Despliegue gratuito en Firebase (Hosting + Firestore, plan Spark): [`docs/FIREBASE.md`](docs/FIREBASE.md). La versión SQLite anterior se conserva con el tag `v1-sqlite-stable`.
 
+## Desarrollo con Cursor
+
+El proyecto incluye la skill de dominio **mec-terminales-cuenta-h** en [`.cursor/skills/mec-terminales-cuenta-h/SKILL.md`](.cursor/skills/mec-terminales-cuenta-h/SKILL.md). Documenta la relación entre terminaciones de cuenta contable (últimos seis dígitos del mayor Quiter) y códigos de terminal/dealer en la importación libro, alineada con [`src/terminals.ts`](src/terminals.ts) y validada por [`tests/terminals.test.ts`](tests/terminals.test.ts). El agente la consulta al modificar importadores o reglas de terminal sin duplicar lógica en el frontend.
+
 ## Desarrollo
 
 Requiere Node.js 22 o posterior.

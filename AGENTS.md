@@ -138,7 +138,7 @@ por terminación de cuenta.
 | SQL, migraciones y estados | `src/db.ts` |
 | Parseo e importación | `src/importers.ts` |
 | Matching y propuestas | `src/reconcile.ts` |
-| Dealers y cuentas | `src/terminals.ts` |
+| Dealers y cuentas | `src/terminals.ts` · skill [`.cursor/skills/mec-terminales-cuenta-h/SKILL.md`](.cursor/skills/mec-terminales-cuenta-h/SKILL.md) |
 | Pantallas y flujo UI | `web/src/main.ts` |
 | Estilos | `web/src/style.css` |
 | Puertos y proxy | `vite.config.ts` |
