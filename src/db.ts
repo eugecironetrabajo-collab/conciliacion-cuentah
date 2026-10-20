@@ -808,7 +808,7 @@ if (!bookNormalization) {
       }
       const amounts = normalizeBookAmounts(row.debit_cents, row.credit_cents)
       const dealer = terminal.dealer || row.dealer
-      let fingerprint = bookFingerprint(row.date, row.ref1, row.ref2, amounts.debitCents, amounts.creditCents, row.notes, dealer)
+      let fingerprint = bookFingerprint(row.date, row.ref1, row.ref2, amounts.debitCents, amounts.creditCents, row.notes, dealer, row.sector)
       const owner = fingerprintOwner.get(fingerprint) as { id: number } | undefined
       if (owner && owner.id !== row.id) {
         if (!linkedBook.get(row.id)) {

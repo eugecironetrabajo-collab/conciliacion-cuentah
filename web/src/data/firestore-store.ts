@@ -24,7 +24,7 @@ import { filterMovements, parseMovementQuery } from '../../../src/movement-filte
 import { loadDate } from '../../../src/load-date.js'
 import type { AdjustmentInput, ImportRow, Movement, Origin, ReconciliationRecord } from '../../../src/types.js'
 import { getFirebaseAuth, getFirestoreDb } from '../firebase-app.js'
-import { importRowsIntoState, movementValues, parseFilesForOrigin } from './import-batches.js'
+import { importFingerprint, importRowsIntoState, movementValues, parseFilesForOrigin } from './import-batches.js'
 import { normalizeAssignee } from '../../../src/assignees.js'
 import { isFirestoreMovementListRequest } from './firestore-api-routes.js'
 import { type MovementDoc, movementsFromFirestoreDocs } from './firestore-movement-doc.js'
@@ -143,7 +143,7 @@ export async function ensureDemoSeeded() {
   const rows = await loadAllMovements(true)
   if (rows.length) return
   const { movements } = importRowsIntoState([], [{ name: 'demo', rows: DEMO_ROWS }])
-  const withFp = movements.map((m) => ({ ...m, fingerprint: movementValues(m).fingerprint }))
+  const withFp = movements.map((m) => ({ ...m, fingerprint: m.fingerprint ?? importFingerprint(m) }))
   await saveAllMovements(withFp)
   const maxId = withFp.reduce((max, row) => Math.max(max, row.id), 0)
   await setDoc(metaDoc(), { movement: maxId, reconciliation: 0, audit: 0 }, { merge: true })
@@ -439,7 +439,7 @@ export async function firestoreImport(origin: 'banco' | 'libro', files: File[]) 
   }
   await saveAllMovements(movements.map((m) => ({
     ...m,
-    fingerprint: movementValues(m).fingerprint,
+    fingerprint: m.fingerprint ?? importFingerprint(m),
   })))
   const maxId = movements.reduce((max, row) => Math.max(max, row.id), 0)
   await setDoc(metaDoc(), { movement: maxId }, { merge: true })

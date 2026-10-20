@@ -246,7 +246,7 @@ function parseQuiter(buffer: Buffer): ParsedImport {
         creditCents,
         notes: concept,
         dealer,
-        fingerprint: bookFingerprint(date, reference, documentNo, debitCents, creditCents, concept, dealer),
+        fingerprint: bookFingerprint(date, reference, documentNo, debitCents, creditCents, concept, dealer, account),
       })
     } catch (error) {
       errors.push(`Fila ${excelRow}: ${error instanceof Error ? error.message : error}`)

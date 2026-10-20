@@ -65,6 +65,7 @@ export function movementLabel(origin: string, dealer: string, sector: string) {
   return place ? `${ending} · ${place}` : ending
 }
 
+/** Stable import/dedup key: Quiter fields only (concept prefix L-dd/mm/yyyy is excluded). */
 export const bookFingerprint = (
   date: string,
   reference: string,
@@ -73,4 +74,18 @@ export const bookFingerprint = (
   creditCents: number,
   concept: string,
   dealer: string,
-) => JSON.stringify(['LIBRO', date, reference, documentNo, debitCents, creditCents, concept, dealer])
+  sector = '',
+) => {
+  const terminal = bookTerminal(sector, concept)
+  const normalizedDealer = terminal.dealer || dealer || '6'
+  return JSON.stringify([
+    'LIBRO',
+    date,
+    reference,
+    documentNo,
+    debitCents,
+    creditCents,
+    accountEnding(sector),
+    normalizedDealer,
+  ])
+}
